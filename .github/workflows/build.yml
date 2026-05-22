@@ -26,28 +26,16 @@ jobs:
           LATEST_TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "0.0.1")
           CLEAN_TAG=${LATEST_TAG#v}
           
-          if git rev-parse "$LATEST_TAG" >/dev/null 2>&1; then
-            COMMITS_SINCE=$(git rev-list --count "$LATEST_TAG..HEAD" 2>/dev/null || echo "0")
-          else
-            COMMITS_SINCE=$(git rev-list --count HEAD 2>/dev/null || echo "0")
-          fi
-          
-          IFS='.' read -r major minor patch <<< "$CLEAN_TAG"
-          major=${major:-0}
-          minor=${minor:-0}
-          patch=${patch:-1}
-          
-          if [ "$COMMITS_SINCE" -eq 0 ]; then
-            VERSION_NAME="${major}.${minor}.${patch}"
-          else
-            VERSION_NAME="${major}.${minor}.${patch}.${COMMITS_SINCE}"
-          fi
-          VERSION_CODE=$(git rev-list --count HEAD 2>/dev/null || echo "1")
+          VERSION_NAME="${CLEAN_TAG}"
+          VERSION_CODE="${{ github.run_number }}"
+          CI_VERSION="${CLEAN_TAG}-${{ github.run_number }}"
           
           echo "VERSION_NAME=$VERSION_NAME" >> $GITHUB_ENV
           echo "VERSION_CODE=$VERSION_CODE" >> $GITHUB_ENV
+          echo "CI_VERSION=$CI_VERSION" >> $GITHUB_ENV
           echo "Computed Version Name: $VERSION_NAME"
           echo "Computed Version Code: $VERSION_CODE"
+          echo "Computed CI Version: $CI_VERSION"
 
       - name: Grant execute permission for gradlew
         run: chmod +x gradlew
@@ -58,5 +46,5 @@ jobs:
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4
         with:
-          name: app-debug-${{ env.VERSION_NAME }}
+          name: app-debug-${{ env.CI_VERSION }}
           path: app/build/outputs/apk/debug/app-debug.apk
