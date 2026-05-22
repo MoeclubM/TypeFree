@@ -41,6 +41,13 @@ android {
     }
 
     buildTypes {
+        debug {
+            val hasSignature = !System.getenv("KEYSTORE_PASSWORD").isNullOrEmpty() || 
+                               !localProperties.getProperty("KEYSTORE_PASSWORD").isNullOrEmpty()
+            if (hasSignature) {
+                signingConfig = signingConfigs.getByName("release")
+            }
+        }
         release {
             isMinifyEnabled = true
             isShrinkResources = true
