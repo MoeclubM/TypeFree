@@ -2,11 +2,16 @@ package com.typefree.ime.data
 
 import android.content.Context
 import android.util.Log
+import android.util.LruCache
 import java.io.BufferedReader
 import java.io.InputStreamReader
 
 class PinyinDict(private val context: Context) {
     private val dict = HashMap<String, MutableList<String>>()
+
+    // LRU caches to avoid recomputing segments and candidates on every keystroke
+    private val segmentCache = LruCache<String, List<String>>(SEGMENT_CACHE_SIZE)
+    private val candidateCache = LruCache<String, List<String>>(CANDIDATE_CACHE_SIZE)
 
     init {
         loadDict()
@@ -40,37 +45,34 @@ class PinyinDict(private val context: Context) {
         }
     }
 
-    /**
-     * Looks up candidates for a given pinyin input.
-     * Supports multi-syllable exact matches, and simple segmentation fallback.
-     */
     fun getCandidates(pinyin: String): List<String> {
         val clean = pinyin.lowercase().replace("'", "").replace(" ", "")
         if (clean.isEmpty()) return emptyList()
 
-        // 1. Direct map lookup
+        // Check cache first
+        candidateCache.get(clean)?.let { return it }
+
+        val result = computeCandidates(clean)
+        candidateCache.put(clean, result)
+        return result
+    }
+
+    private fun computeCandidates(clean: String): List<String> {
+        val candidates = mutableListOf<String>()
+
         val direct = dict[clean]
         if (direct != null && direct.isNotEmpty()) {
-            return direct.distinct()
+            candidates.addAll(direct.distinct())
         }
 
-        // 2. Simple segmentation logic for multi-syllable words
-        // e.g. "nihao" -> "ni" + "hao"
-        // Let's find matches by looking at prefixes
-        val candidates = mutableListOf<String>()
-        
-        // Find split points
         val splits = segmentPinyin(clean)
         if (splits.isNotEmpty()) {
-            // Combine candidates of parts. For simplicity, if we have [ni, hao], we cross-combine
-            // the first couple of candidates for each, e.g. "你" + "好" = "你好"
             val partCandidates = splits.map { dict[it] ?: emptyList() }
             if (partCandidates.all { it.isNotEmpty() }) {
-                // Cross join top candidates
                 val limit = 5
                 val list1 = partCandidates[0].take(limit)
                 var resultList = list1
-                
+
                 for (i in 1 until partCandidates.size) {
                     val list2 = partCandidates[i].take(limit)
                     val nextList = mutableListOf<String>()
@@ -85,7 +87,6 @@ class PinyinDict(private val context: Context) {
             }
         }
 
-        // Add fallback prefix matches (e.g. if typing 'n', return words starting with 'n')
         if (clean.length == 1) {
             val matches = dict.keys.filter { it.startsWith(clean) && it.length > 1 }
                 .flatMap { dict[it] ?: emptyList() }
@@ -96,18 +97,15 @@ class PinyinDict(private val context: Context) {
         return candidates.distinct()
     }
 
-    /**
-     * Greedy pinyin segmenter.
-     * Splits a run of letters into valid pinyin syllables.
-     */
     private fun segmentPinyin(input: String): List<String> {
+        segmentCache.get(input)?.let { return it }
+
         val result = mutableListOf<String>()
         var index = 0
         val len = input.length
-        
+
         while (index < len) {
             var found = false
-            // Try matching longest valid pinyin key
             for (width in minOf(6, len - index) downTo 1) {
                 val sub = input.substring(index, index + width)
                 if (dict.containsKey(sub)) {
@@ -118,11 +116,17 @@ class PinyinDict(private val context: Context) {
                 }
             }
             if (!found) {
-                // Skip invalid char
                 result.add(input[index].toString())
                 index++
             }
         }
+
+        segmentCache.put(input, result)
         return result
+    }
+
+    companion object {
+        private const val SEGMENT_CACHE_SIZE = 512
+        private const val CANDIDATE_CACHE_SIZE = 1024
     }
 }

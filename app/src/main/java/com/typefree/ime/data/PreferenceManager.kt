@@ -2,6 +2,9 @@ package com.typefree.ime.data
 
 import android.content.Context
 import android.content.SharedPreferences
+import android.util.Log
+import androidx.security.crypto.EncryptedSharedPreferences
+import androidx.security.crypto.MasterKey
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
@@ -14,22 +17,45 @@ data class ProviderConfig(
     val baseUrl: String = "",
     val selectedModel: String = "",
     val models: List<String> = emptyList(),
-    val type: String = "openai" // "openai" or "anthropic"
+    val type: String = "openai"
 )
 
 @Serializable
 data class AsrConfig(
-    val mode: String = "local", // "local" or "api"
+    val mode: String = "local",
     val apiKey: String = "",
     val baseUrl: String = "https://api.openai.com/v1",
-    val model: String = "whisper-1"
+    val model: String = "whisper-1",
+    val language: String = "zh"
 )
 
 class PreferenceManager(context: Context) {
-    private val prefs: SharedPreferences = context.getSharedPreferences("TypeFreePrefs", Context.MODE_PRIVATE)
     private val json = Json { ignoreUnknownKeys = true }
 
+    private val securePrefs: SharedPreferences = try {
+        val masterKey = MasterKey.Builder(context)
+            .setKeyScheme(MasterKey.KeyScheme.AES256_GCM)
+            .build()
+        EncryptedSharedPreferences.create(
+            context,
+            SECURE_PREFS_NAME,
+            masterKey,
+            EncryptedSharedPreferences.PrefKeyEncryptionScheme.AES256_SIV,
+            EncryptedSharedPreferences.PrefValueEncryptionScheme.AES256_GCM
+        )
+    } catch (e: Exception) {
+        Log.w(TAG, "EncryptedSharedPreferences unavailable, falling back to plaintext", e)
+        context.getSharedPreferences(SECURE_PREFS_NAME, Context.MODE_PRIVATE)
+    }
+
+    private val plainPrefs: SharedPreferences =
+        context.getSharedPreferences(PLAIN_PREFS_NAME, Context.MODE_PRIVATE)
+
     companion object {
+        private const val TAG = "PreferenceManager"
+        private const val SECURE_PREFS_NAME = "TypeFreeSecurePrefs"
+        private const val PLAIN_PREFS_NAME = "TypeFreePlainPrefs"
+
         private const val KEY_PROVIDERS = "providers"
         private const val KEY_ACTIVE_PROVIDER_ID = "active_provider_id"
         private const val KEY_ASR_CONFIG = "asr_config"
@@ -64,7 +90,7 @@ class PreferenceManager(context: Context) {
             ProviderConfig(
                 id = "ollama",
                 name = "Ollama (Local)",
-                baseUrl = "http://10.0.2.2:11434/v1", // 10.0.2.2 points to localhost from Android emulator
+                baseUrl = "http://10.0.2.2:11434/v1",
                 selectedModel = "llama3",
                 models = listOf("llama3", "mistral", "qwen2"),
                 type = "openai"
@@ -73,25 +99,26 @@ class PreferenceManager(context: Context) {
     }
 
     fun getProviders(): List<ProviderConfig> {
-        val providersJson = prefs.getString(KEY_PROVIDERS, null) ?: return DEFAULT_PROVIDERS
+        val providersJson = securePrefs.getString(KEY_PROVIDERS, null) ?: return DEFAULT_PROVIDERS
         return try {
             json.decodeFromString<List<ProviderConfig>>(providersJson)
         } catch (e: Exception) {
+            Log.e(TAG, "Failed to decode providers", e)
             DEFAULT_PROVIDERS
         }
     }
 
     fun saveProviders(providers: List<ProviderConfig>) {
         val jsonStr = json.encodeToString(providers)
-        prefs.edit().putString(KEY_PROVIDERS, jsonStr).apply()
+        securePrefs.edit().putString(KEY_PROVIDERS, jsonStr).apply()
     }
 
     fun getActiveProviderId(): String {
-        return prefs.getString(KEY_ACTIVE_PROVIDER_ID, "openai") ?: "openai"
+        return plainPrefs.getString(KEY_ACTIVE_PROVIDER_ID, "openai") ?: "openai"
     }
 
     fun setActiveProviderId(id: String) {
-        prefs.edit().putString(KEY_ACTIVE_PROVIDER_ID, id).apply()
+        plainPrefs.edit().putString(KEY_ACTIVE_PROVIDER_ID, id).apply()
     }
 
     fun getActiveProvider(): ProviderConfig {
@@ -101,32 +128,33 @@ class PreferenceManager(context: Context) {
     }
 
     fun getAsrConfig(): AsrConfig {
-        val asrJson = prefs.getString(KEY_ASR_CONFIG, null) ?: return AsrConfig()
+        val asrJson = securePrefs.getString(KEY_ASR_CONFIG, null) ?: return AsrConfig()
         return try {
             json.decodeFromString<AsrConfig>(asrJson)
         } catch (e: Exception) {
+            Log.e(TAG, "Failed to decode ASR config", e)
             AsrConfig()
         }
     }
 
     fun saveAsrConfig(config: AsrConfig) {
         val jsonStr = json.encodeToString(config)
-        prefs.edit().putString(KEY_ASR_CONFIG, jsonStr).apply()
+        securePrefs.edit().putString(KEY_ASR_CONFIG, jsonStr).apply()
     }
 
     fun isContextPredictionEnabled(): Boolean {
-        return prefs.getBoolean(KEY_CONTEXT_PREDICTION_ENABLED, true)
+        return plainPrefs.getBoolean(KEY_CONTEXT_PREDICTION_ENABLED, true)
     }
 
     fun setContextPredictionEnabled(enabled: Boolean) {
-        prefs.edit().putBoolean(KEY_CONTEXT_PREDICTION_ENABLED, enabled).apply()
+        plainPrefs.edit().putBoolean(KEY_CONTEXT_PREDICTION_ENABLED, enabled).apply()
     }
 
     fun isPinyinLlmEnabled(): Boolean {
-        return prefs.getBoolean(KEY_PINYIN_LLM_ENABLED, true)
+        return plainPrefs.getBoolean(KEY_PINYIN_LLM_ENABLED, true)
     }
 
     fun setPinyinLlmEnabled(enabled: Boolean) {
-        prefs.edit().putBoolean(KEY_PINYIN_LLM_ENABLED, enabled).apply()
+        plainPrefs.edit().putBoolean(KEY_PINYIN_LLM_ENABLED, enabled).apply()
     }
 }

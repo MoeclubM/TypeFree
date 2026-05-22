@@ -17,8 +17,8 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.scale
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.hapticfeedback.HapticFeedbackType
-import androidx.compose.ui.platform.LocalHapticFeedback
+import android.view.HapticFeedbackConstants
+import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
@@ -280,7 +280,7 @@ fun KeyboardKey(
 ) {
     val interactionSource = remember { MutableInteractionSource() }
     val isPressed by interactionSource.collectIsPressedAsState()
-    val haptic = LocalHapticFeedback.current
+    val view = LocalView.current
 
     val scale by animateFloatAsState(if (isPressed) 0.92f else 1.0f)
 
@@ -301,7 +301,7 @@ fun KeyboardKey(
                 interactionSource = interactionSource,
                 indication = null
             ) {
-                haptic.performHapticFeedback(HapticFeedbackType.KeyboardTap)
+                view.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
                 onClick()
             },
         contentAlignment = Alignment.Center

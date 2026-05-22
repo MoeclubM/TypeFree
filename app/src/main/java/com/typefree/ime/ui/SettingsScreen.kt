@@ -5,7 +5,6 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
@@ -14,7 +13,6 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.unit.dp
@@ -45,14 +43,13 @@ fun SettingsScreen(
     val editableProviders = remember { mutableStateMapOf<String, ProviderConfig>().apply {
         providers.forEach { put(it.id, it) }
     }}
-    
-    // ASR state variables
+
     var asrMode by remember { mutableStateOf(asrConfig.mode) }
     var asrApiKey by remember { mutableStateOf(asrConfig.apiKey) }
     var asrBaseUrl by remember { mutableStateOf(asrConfig.baseUrl) }
     var asrModel by remember { mutableStateOf(asrConfig.model) }
+    var asrLanguage by remember { mutableStateOf(asrConfig.language) }
 
-    // Toggle states
     var pinyinLlm by remember { mutableStateOf(isPinyinLlmEnabled) }
     var contextPrediction by remember { mutableStateOf(isContextPredictionEnabled) }
 
@@ -60,6 +57,16 @@ fun SettingsScreen(
 
     var showProviderMenu by remember { mutableStateOf(false) }
     var showAsrMenu by remember { mutableStateOf(false) }
+    var showLanguageMenu by remember { mutableStateOf(false) }
+
+    // Available ASR languages
+    val asrLanguages = listOf(
+        "zh" to "Chinese (中文)",
+        "en" to "English",
+        "ja" to "Japanese (日本語)",
+        "ko" to "Korean (한국어)",
+        "auto" to "Auto-detect"
+    )
 
     Scaffold(
         topBar = {
@@ -81,49 +88,28 @@ fun SettingsScreen(
                 .verticalScroll(rememberScrollState()),
             verticalArrangement = Arrangement.spacedBy(16.dp)
         ) {
-            // 1. Activation Guide
-            Card(
-                colors = CardDefaults.cardColors(containerColor = DarkSurface)
-            ) {
+            // Activation Guide
+            Card(colors = CardDefaults.cardColors(containerColor = DarkSurface)) {
                 Column(
                     modifier = Modifier.padding(16.dp).fillMaxWidth(),
                     verticalArrangement = Arrangement.spacedBy(12.dp)
                 ) {
                     Text("Keyboard Activation Guide", fontSize = 16.sp, fontWeight = FontWeight.Bold, color = PrimaryBlue)
-                    
-                    GuideRow(
-                        step = "1",
-                        title = "Enable Keyboard",
-                        isCompleted = isImeEnabled,
-                        onClick = onEnableImeClick
-                    )
-                    
-                    GuideRow(
-                        step = "2",
-                        title = "Switch default to TypeFree",
-                        isCompleted = isImeSelected,
-                        onClick = onSelectImeClick
-                    )
 
-                    GuideRow(
-                        step = "3",
-                        title = "Grant Mic Permission (ASR)",
-                        isCompleted = hasMicrophonePermission,
-                        onClick = onRequestPermissionClick
-                    )
+                    GuideRow(step = "1", title = "Enable Keyboard", isCompleted = isImeEnabled, onClick = onEnableImeClick)
+                    GuideRow(step = "2", title = "Switch default to TypeFree", isCompleted = isImeSelected, onClick = onSelectImeClick)
+                    GuideRow(step = "3", title = "Grant Mic Permission (ASR)", isCompleted = hasMicrophonePermission, onClick = onRequestPermissionClick)
                 }
             }
 
-            // 2. Preferences Toggle
-            Card(
-                colors = CardDefaults.cardColors(containerColor = DarkSurface)
-            ) {
+            // LLM Toggles
+            Card(colors = CardDefaults.cardColors(containerColor = DarkSurface)) {
                 Column(
                     modifier = Modifier.padding(16.dp).fillMaxWidth(),
                     verticalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
                     Text("LLM Assistant Controls", fontSize = 16.sp, fontWeight = FontWeight.Bold, color = PrimaryBlue)
-                    
+
                     Row(
                         modifier = Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.SpaceBetween,
@@ -138,23 +124,20 @@ fun SettingsScreen(
                         horizontalArrangement = Arrangement.SpaceBetween,
                         verticalAlignment = Alignment.CenterVertically
                     ) {
-                        Text("Enable Context-Aware Next-Word Predictions", fontSize = 14.sp, color = Color.White)
+                        Text("Enable Context-Aware Predictions", fontSize = 14.sp, color = Color.White)
                         Switch(checked = contextPrediction, onCheckedChange = { contextPrediction = it })
                     }
                 }
             }
 
-            // 3. LLM API configuration
-            Card(
-                colors = CardDefaults.cardColors(containerColor = DarkSurface)
-            ) {
+            // LLM API Settings
+            Card(colors = CardDefaults.cardColors(containerColor = DarkSurface)) {
                 Column(
                     modifier = Modifier.padding(16.dp).fillMaxWidth(),
                     verticalArrangement = Arrangement.spacedBy(12.dp)
                 ) {
                     Text("LLM API Settings", fontSize = 16.sp, fontWeight = FontWeight.Bold, color = PrimaryBlue)
 
-                    // Provider dropdown selector
                     Box(modifier = Modifier.fillMaxWidth()) {
                         OutlinedButton(
                             onClick = { showProviderMenu = true },
@@ -162,23 +145,16 @@ fun SettingsScreen(
                         ) {
                             Text("Active Provider: ${activeConfig.name}")
                         }
-                        DropdownMenu(
-                            expanded = showProviderMenu,
-                            onDismissRequest = { showProviderMenu = false }
-                        ) {
+                        DropdownMenu(expanded = showProviderMenu, onDismissRequest = { showProviderMenu = false }) {
                             providers.forEach { p ->
                                 DropdownMenuItem(
                                     text = { Text(p.name) },
-                                    onClick = {
-                                        selectedProviderId = p.id
-                                        showProviderMenu = false
-                                    }
+                                    onClick = { selectedProviderId = p.id; showProviderMenu = false }
                                 )
                             }
                         }
                     }
 
-                    // Base URL Input
                     var baseUrlInput by remember(selectedProviderId) { mutableStateOf(activeConfig.baseUrl) }
                     OutlinedTextField(
                         value = baseUrlInput,
@@ -188,13 +164,9 @@ fun SettingsScreen(
                         },
                         label = { Text("Base URL") },
                         modifier = Modifier.fillMaxWidth(),
-                        colors = TextFieldDefaults.colors(
-                            focusedTextColor = Color.White,
-                            unfocusedTextColor = Color.White
-                        )
+                        colors = TextFieldDefaults.colors(focusedTextColor = Color.White, unfocusedTextColor = Color.White)
                     )
 
-                    // API Key Input
                     var apiKeyInput by remember(selectedProviderId) { mutableStateOf(activeConfig.apiKey) }
                     var maskKey by remember { mutableStateOf(true) }
                     OutlinedTextField(
@@ -211,13 +183,9 @@ fun SettingsScreen(
                             }
                         },
                         modifier = Modifier.fillMaxWidth(),
-                        colors = TextFieldDefaults.colors(
-                            focusedTextColor = Color.White,
-                            unfocusedTextColor = Color.White
-                        )
+                        colors = TextFieldDefaults.colors(focusedTextColor = Color.White, unfocusedTextColor = Color.White)
                     )
 
-                    // Model Name Input
                     var modelInput by remember(selectedProviderId) { mutableStateOf(activeConfig.selectedModel) }
                     OutlinedTextField(
                         value = modelInput,
@@ -227,18 +195,13 @@ fun SettingsScreen(
                         },
                         label = { Text("Model Name") },
                         modifier = Modifier.fillMaxWidth(),
-                        colors = TextFieldDefaults.colors(
-                            focusedTextColor = Color.White,
-                            unfocusedTextColor = Color.White
-                        )
+                        colors = TextFieldDefaults.colors(focusedTextColor = Color.White, unfocusedTextColor = Color.White)
                     )
                 }
             }
 
-            // 4. ASR settings configuration
-            Card(
-                colors = CardDefaults.cardColors(containerColor = DarkSurface)
-            ) {
+            // ASR Settings
+            Card(colors = CardDefaults.cardColors(containerColor = DarkSurface)) {
                 Column(
                     modifier = Modifier.padding(16.dp).fillMaxWidth(),
                     verticalArrangement = Arrangement.spacedBy(12.dp)
@@ -252,23 +215,14 @@ fun SettingsScreen(
                         ) {
                             Text("ASR Mode: ${if (asrMode == "local") "Local SpeechRecognizer" else "OpenAI Whisper API"}")
                         }
-                        DropdownMenu(
-                            expanded = showAsrMenu,
-                            onDismissRequest = { showAsrMenu = false }
-                        ) {
+                        DropdownMenu(expanded = showAsrMenu, onDismissRequest = { showAsrMenu = false }) {
                             DropdownMenuItem(
                                 text = { Text("Local (Android Native)") },
-                                onClick = {
-                                    asrMode = "local"
-                                    showAsrMenu = false
-                                }
+                                onClick = { asrMode = "local"; showAsrMenu = false }
                             )
                             DropdownMenuItem(
                                 text = { Text("API (Whisper)") },
-                                onClick = {
-                                    asrMode = "api"
-                                    showAsrMenu = false
-                                }
+                                onClick = { asrMode = "api"; showAsrMenu = false }
                             )
                         }
                     }
@@ -279,7 +233,7 @@ fun SettingsScreen(
                             onValueChange = { asrBaseUrl = it },
                             label = { Text("Whisper API URL") },
                             modifier = Modifier.fillMaxWidth(),
-                            colors = TextFieldDefaults.colors(focusedTextColor = Color.White)
+                            colors = TextFieldDefaults.colors(focusedTextColor = Color.White, unfocusedTextColor = Color.White)
                         )
 
                         OutlinedTextField(
@@ -288,7 +242,7 @@ fun SettingsScreen(
                             label = { Text("Whisper API Key") },
                             visualTransformation = PasswordVisualTransformation(),
                             modifier = Modifier.fillMaxWidth(),
-                            colors = TextFieldDefaults.colors(focusedTextColor = Color.White)
+                            colors = TextFieldDefaults.colors(focusedTextColor = Color.White, unfocusedTextColor = Color.White)
                         )
 
                         OutlinedTextField(
@@ -296,13 +250,32 @@ fun SettingsScreen(
                             onValueChange = { asrModel = it },
                             label = { Text("Whisper Model") },
                             modifier = Modifier.fillMaxWidth(),
-                            colors = TextFieldDefaults.colors(focusedTextColor = Color.White)
+                            colors = TextFieldDefaults.colors(focusedTextColor = Color.White, unfocusedTextColor = Color.White)
                         )
+
+                        // Language selector
+                        Box(modifier = Modifier.fillMaxWidth()) {
+                            OutlinedButton(
+                                onClick = { showLanguageMenu = true },
+                                modifier = Modifier.fillMaxWidth()
+                            ) {
+                                val langLabel = asrLanguages.find { it.first == asrLanguage }?.second ?: asrLanguage
+                                Text("Language: $langLabel")
+                            }
+                            DropdownMenu(expanded = showLanguageMenu, onDismissRequest = { showLanguageMenu = false }) {
+                                asrLanguages.forEach { (code, name) ->
+                                    DropdownMenuItem(
+                                        text = { Text(name) },
+                                        onClick = { asrLanguage = code; showLanguageMenu = false }
+                                    )
+                                }
+                            }
+                        }
                     }
                 }
             }
 
-            // Save configuration CTA
+            // Save
             Button(
                 onClick = {
                     onSaveConfig(
@@ -312,15 +285,14 @@ fun SettingsScreen(
                             mode = asrMode,
                             apiKey = asrApiKey,
                             baseUrl = asrBaseUrl,
-                            model = asrModel
+                            model = asrModel,
+                            language = asrLanguage
                         ),
                         pinyinLlm,
                         contextPrediction
                     )
                 },
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .height(50.dp),
+                modifier = Modifier.fillMaxWidth().height(50.dp),
                 shape = RoundedCornerShape(12.dp)
             ) {
                 Text("Save Configuration", fontSize = 16.sp, fontWeight = FontWeight.Bold)
@@ -359,7 +331,7 @@ fun GuideRow(
             Spacer(modifier = Modifier.width(12.dp))
             Text(title, color = Color.White, fontSize = 14.sp)
         }
-        
+
         Text(
             text = if (isCompleted) "✓ Ready" else "✕ Set Up",
             color = if (isCompleted) Color(0xFF4CAF50) else Color(0xFFFF9800),
