@@ -1,0 +1,28 @@
+# Gradle files
+.gradle/
+build/
+app/build/
+
+# Kotlin / IntelliJ files
+.kotlin/
+.idea/
+*.iml
+*.ipr
+*.iws
+
+# Android specific
+local.properties
+*.apk
+*.ap_
+*.dex
+*.class
+
+# Log files
+*.log
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Agent files
+.antigravitycli/

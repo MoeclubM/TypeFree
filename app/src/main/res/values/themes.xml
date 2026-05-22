@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <style name="Theme.TypeFree" parent="android:Theme.DeviceDefault.NoActionBar">
+        <!-- Primary brand color. -->
+        <item name="android:colorPrimary">@android:color/holo_blue_light</item>
+        <item name="android:statusBarColor">@android:color/transparent</item>
+    </style>
+</resources>
+
