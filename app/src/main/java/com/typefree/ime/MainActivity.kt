@@ -26,6 +26,9 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.compose.ui.platform.LocalLifecycleOwner
 import com.typefree.ime.ui.theme.TypeFreeTheme
 
 class MainActivity : ComponentActivity() {
@@ -52,11 +55,20 @@ class MainActivity : ComponentActivity() {
                 var hasMicPermission by remember { mutableStateOf(false) }
 
                 // Periodic checks when activity starts/resumes
-                LaunchedEffect(Unit) {
-                    checkStatus { enabled, selected, mic ->
-                        isImeEnabled = enabled
-                        isImeSelected = selected
-                        hasMicPermission = mic
+                val lifecycleOwner = LocalLifecycleOwner.current
+                DisposableEffect(lifecycleOwner) {
+                    val observer = LifecycleEventObserver { _, event ->
+                        if (event == Lifecycle.Event.ON_RESUME) {
+                            checkStatus { enabled, selected, mic ->
+                                isImeEnabled = enabled
+                                isImeSelected = selected
+                                hasMicPermission = mic
+                            }
+                        }
+                    }
+                    lifecycleOwner.lifecycle.addObserver(observer)
+                    onDispose {
+                        lifecycleOwner.lifecycle.removeObserver(observer)
                     }
                 }
 
@@ -195,13 +207,7 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    override fun onResume() {
-        super.onResume()
-        // Re-check IME settings status when returning to app
-        setContent {
-            this.onCreate(null)
-        }
-    }
+    // Lifecycle-based state updates are handled by LocalLifecycleOwner in Compose
 
     private fun checkStatus(onChecked: (enabled: Boolean, selected: Boolean, mic: Boolean) -> Unit) {
         val imm = getSystemService(Context.INPUT_METHOD_SERVICE) as InputMethodManager
