@@ -9,7 +9,6 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -18,7 +17,8 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.scale
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
+import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
@@ -53,6 +53,13 @@ fun KeyboardView(
     var layoutMode by remember { mutableStateOf(KeyboardLayout.ALPHA) }
     var isShiftActive by remember { mutableStateOf(false) }
 
+    // Auto-cancel shift after one letter typed
+    fun handleAlphaKey(key: String) {
+        val output = if (isShiftActive) key.uppercase() else key
+        if (isShiftActive) isShiftActive = false
+        onKeyClick(output)
+    }
+
     val rowsAlpha = listOf(
         listOf("q", "w", "e", "r", "t", "y", "u", "i", "o", "p"),
         listOf("a", "s", "d", "f", "g", "h", "j", "k", "l"),
@@ -62,7 +69,7 @@ fun KeyboardView(
 
     val rowsSymbols = listOf(
         listOf("1", "2", "3", "4", "5", "6", "7", "8", "9", "0"),
-        listOf("@", "#", "$", "%", "&", "*", "-", "+", "(", ")"),
+        listOf("@", "#", "\$", "%", "&", "*", "-", "+", "(", ")"),
         listOf("=", "/", "\\", "\"", "'", ":", ";", "!", "?", "backspace"),
         listOf("abc", "lang", "settings", "space", "mic", "enter")
     )
@@ -75,7 +82,7 @@ fun KeyboardView(
             .background(DarkBackground)
             .padding(bottom = 8.dp)
     ) {
-        // 1. Candidate Bar / Voice Overlay
+        // Candidate Bar / Voice Overlay
         Box(
             modifier = Modifier
                 .fillMaxWidth()
@@ -85,7 +92,6 @@ fun KeyboardView(
             contentAlignment = Alignment.CenterStart
         ) {
             if (recordingState != RecordingState.IDLE) {
-                // Voice Recording State Overlay
                 Row(
                     modifier = Modifier.fillMaxSize(),
                     verticalAlignment = Alignment.CenterVertically,
@@ -93,7 +99,7 @@ fun KeyboardView(
                 ) {
                     when (recordingState) {
                         RecordingState.RECORDING -> {
-                            val pulse by animateFloatAsState(targetValue = 1.1f) // simple mock pulse
+                            val pulse by animateFloatAsState(targetValue = 1.1f)
                             Box(
                                 modifier = Modifier
                                     .size(12.dp)
@@ -103,7 +109,7 @@ fun KeyboardView(
                             )
                             Spacer(modifier = Modifier.width(8.dp))
                             Text(
-                                text = "Recording... Tap MIC to stop and transcribe",
+                                text = "Recording... Tap MIC to stop",
                                 color = Color.Red,
                                 fontWeight = FontWeight.Bold,
                                 fontSize = 14.sp
@@ -128,7 +134,6 @@ fun KeyboardView(
                     }
                 }
             } else if (pinyinBuffer.isNotEmpty() || candidates.isNotEmpty()) {
-                // Candidates scrolling list
                 LazyRow(
                     modifier = Modifier.fillMaxSize(),
                     verticalAlignment = Alignment.CenterVertically,
@@ -142,7 +147,6 @@ fun KeyboardView(
                     }
                 }
             } else {
-                // Empty state instructions
                 Row(
                     modifier = Modifier.fillMaxSize().padding(horizontal = 8.dp),
                     verticalAlignment = Alignment.CenterVertically,
@@ -164,7 +168,7 @@ fun KeyboardView(
             }
         }
 
-        // Pinyin input buffer display (only in Chinese mode)
+        // Pinyin buffer display
         if (isChinese && pinyinBuffer.isNotEmpty()) {
             Box(
                 modifier = Modifier
@@ -183,7 +187,7 @@ fun KeyboardView(
 
         Spacer(modifier = Modifier.height(6.dp))
 
-        // 2. Keyboard Rows
+        // Keyboard Rows
         activeRows.forEach { row ->
             Row(
                 modifier = Modifier
@@ -197,29 +201,24 @@ fun KeyboardView(
                         "shift", "backspace", "enter" -> 1.5f
                         else -> 1f
                     }
-                    
-                    Box(
-                        modifier = Modifier.weight(weight)
-                    ) {
+
+                    Box(modifier = Modifier.weight(weight)) {
                         KeyboardKey(
                             key = key,
                             isShiftActive = isShiftActive,
                             isChinese = isChinese,
                             onClick = {
                                 when (key) {
-                                    "shift" -> { isShiftActive = !isShiftActive }
-                                    "backspace" -> { onBackspace() }
-                                    "space" -> { onSpace() }
-                                    "enter" -> { onEnter() }
-                                    "lang" -> { onToggleLanguage() }
-                                    "settings" -> { onSettingsClick() }
-                                    "mic" -> { onMicClick() }
-                                    "?123" -> { layoutMode = KeyboardLayout.SYMBOLS }
-                                    "abc" -> { layoutMode = KeyboardLayout.ALPHA }
-                                    else -> {
-                                        val output = if (isShiftActive) key.uppercase() else key
-                                        onKeyClick(output)
-                                    }
+                                    "shift" -> isShiftActive = !isShiftActive
+                                    "backspace" -> onBackspace()
+                                    "space" -> onSpace()
+                                    "enter" -> onEnter()
+                                    "lang" -> onToggleLanguage()
+                                    "settings" -> onSettingsClick()
+                                    "mic" -> onMicClick()
+                                    "?123" -> layoutMode = KeyboardLayout.SYMBOLS
+                                    "abc" -> layoutMode = KeyboardLayout.ALPHA
+                                    else -> handleAlphaKey(key)
                                 }
                             }
                         )
@@ -243,7 +242,6 @@ fun CandidateItem(
         verticalAlignment = Alignment.CenterVertically
     ) {
         if (candidate.isAi) {
-            // Gradient badge for AI recommendation
             Box(
                 modifier = Modifier
                     .clip(RoundedCornerShape(4.dp))
@@ -282,10 +280,10 @@ fun KeyboardKey(
 ) {
     val interactionSource = remember { MutableInteractionSource() }
     val isPressed by interactionSource.collectIsPressedAsState()
-    
-    // Scale on press animation
+    val haptic = LocalHapticFeedback.current
+
     val scale by animateFloatAsState(if (isPressed) 0.92f else 1.0f)
-    
+
     val bg = when (key) {
         "shift", "backspace", "enter", "lang", "settings", "mic", "?123", "abc" -> SpecialKeyBackground
         "space" -> KeyBackground
@@ -302,24 +300,23 @@ fun KeyboardKey(
             .clickable(
                 interactionSource = interactionSource,
                 indication = null
-            ) { onClick() },
+            ) {
+                haptic.performHapticFeedback(HapticFeedbackType.KeyboardTap)
+                onClick()
+            },
         contentAlignment = Alignment.Center
     ) {
         when (key) {
             "shift" -> {
                 Text(
                     text = if (isShiftActive) "⬆" else "⇧",
-                    color = TextColor,
+                    color = if (isShiftActive) PrimaryBlue else TextColor,
                     fontSize = 18.sp,
                     fontWeight = FontWeight.Bold
                 )
             }
             "backspace" -> {
-                Text(
-                    text = "⌫",
-                    color = TextColor,
-                    fontSize = 18.sp
-                )
+                Text(text = "⌫", color = TextColor, fontSize = 18.sp)
             }
             "enter" -> {
                 Text(
@@ -345,18 +342,10 @@ fun KeyboardKey(
                 )
             }
             "settings" -> {
-                Text(
-                    text = "⚙",
-                    color = TextColor,
-                    fontSize = 16.sp
-                )
+                Text(text = "⚙", color = TextColor, fontSize = 16.sp)
             }
             "mic" -> {
-                Text(
-                    text = "🎙",
-                    color = PrimaryBlue,
-                    fontSize = 16.sp
-                )
+                Text(text = "🎙", color = PrimaryBlue, fontSize = 16.sp)
             }
             else -> {
                 val label = if (isShiftActive) key.uppercase() else key

@@ -38,9 +38,6 @@ class ASRClient(private val context: Context) {
         fun onError(error: String)
     }
 
-    /**
-     * Start speech-to-text in LOCAL mode (using Android's native SpeechRecognizer)
-     */
     fun startLocalSpeech(listener: ASRListener) {
         if (!SpeechRecognizer.isRecognitionAvailable(context)) {
             listener.onError("Native Speech Recognition not available on this device")
@@ -58,7 +55,7 @@ class ASRClient(private val context: Context) {
                 override fun onRmsChanged(rmsdB: Float) {}
                 override fun onBufferReceived(buffer: ByteArray?) {}
                 override fun onEndOfSpeech() {}
-                
+
                 override fun onError(error: Int) {
                     val errorMessage = when (error) {
                         SpeechRecognizer.ERROR_AUDIO -> "Audio recording error"
@@ -94,7 +91,7 @@ class ASRClient(private val context: Context) {
             putExtra(RecognizerIntent.EXTRA_LANGUAGE, Locale.getDefault())
             putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, false)
         }
-        
+
         try {
             nativeSpeechRecognizer?.startListening(intent)
         } catch (e: Exception) {
@@ -106,16 +103,12 @@ class ASRClient(private val context: Context) {
         nativeSpeechRecognizer?.stopListening()
     }
 
-    /**
-     * Start recording for API mode (e.g. OpenAI Whisper)
-     */
     fun startApiRecording(): Boolean {
         try {
             audioFile = File(context.cacheDir, "typefree_voice.m4a").apply {
                 if (exists()) delete()
             }
-            
-            // Handle MediaRecorder constructor according to API version
+
             @Suppress("DEPRECATION")
             mediaRecorder = (if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.S) {
                 MediaRecorder(context)
@@ -138,9 +131,6 @@ class ASRClient(private val context: Context) {
         }
     }
 
-    /**
-     * Stops recording and returns the recorded file
-     */
     fun stopApiRecording(): File? {
         try {
             mediaRecorder?.apply {
@@ -155,26 +145,25 @@ class ASRClient(private val context: Context) {
         return audioFile
     }
 
-    /**
-     * Uploads the recorded file to OpenAI Whisper API compatible endpoint
-     */
     suspend fun transcribeApi(config: AsrConfig, file: File): String? = withContext(Dispatchers.IO) {
         if (!file.exists()) return@withContext null
-        
-        val url = if (config.baseUrl.endsWith("/audio/transcriptions")) config.baseUrl else "${config.baseUrl.trimEnd('/')}/audio/transcriptions"
+
+        val url = if (config.baseUrl.endsWith("/audio/transcriptions")) config.baseUrl
+        else "${config.baseUrl.trimEnd('/')}/audio/transcriptions"
+
         val requestFile = file.asRequestBody("audio/m4a".toMediaType())
-        
+
         val requestBody = MultipartBody.Builder()
             .setType(MultipartBody.FORM)
             .addFormDataPart("file", file.name, requestFile)
             .addFormDataPart("model", config.model)
-            .addFormDataPart("language", "zh")
+            .addFormDataPart("language", config.language)
             .build()
 
         val requestBuilder = Request.Builder()
             .url(url)
             .post(requestBody)
-        
+
         if (config.apiKey.isNotEmpty()) {
             requestBuilder.addHeader("Authorization", "Bearer ${config.apiKey}")
         }
