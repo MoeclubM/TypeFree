@@ -66,6 +66,7 @@ class TypeFreeIME : InputMethodService(),
         val composeView = ComposeView(this)
         composeView.setViewTreeLifecycleOwner(this)
         composeView.setViewTreeViewModelStoreOwner(this)
+        composeView.setViewTreeSavedStateRegistryOwner(this)
 
         composeView.setContent {
             TypeFreeTheme {
@@ -89,7 +90,7 @@ class TypeFreeIME : InputMethodService(),
                     onToggleLanguage = { viewModel.onToggleLanguage() },
                     onMicClick = { viewModel.onMicClick() },
                     onSettingsClick = {
-                        startActivity(Intent(this, MainActivity::class.java).apply {
+                        startActivity(Intent(this, SettingsActivity::class.java).apply {
                             addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
                         })
                     }

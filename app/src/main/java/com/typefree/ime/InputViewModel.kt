@@ -7,7 +7,6 @@ import android.view.inputmethod.EditorInfo
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
-import com.typefree.ime.data.AsrConfig
 import com.typefree.ime.data.PreferenceManager
 import com.typefree.ime.service.ASRClient
 import com.typefree.ime.service.Candidate
@@ -126,9 +125,9 @@ class InputViewModel(
             return
         }
 
-        val config = preferenceManager.getAsrConfig()
+        val mode = preferenceManager.getAsrMode()
 
-        if (config.mode == "local") {
+        if (mode == "local") {
             if (_recordingState.value == RecordingState.RECORDING) {
                 asrClient.stopLocalSpeech()
                 _recordingState.value = RecordingState.IDLE
@@ -151,7 +150,11 @@ class InputViewModel(
                 _recordingState.value = RecordingState.TRANSCRIBING
                 val audioFile = asrClient.stopApiRecording()
                 if (audioFile != null && audioFile.exists()) {
-                    transcribeAudioFile(config, audioFile)
+                    val providerId = preferenceManager.getAsrProviderId()
+                    val provider = preferenceManager.getProvider(providerId) ?: PreferenceManager.DEFAULT_PROVIDERS.first()
+                    val modelName = preferenceManager.getAsrModelName()
+                    val language = preferenceManager.getAsrLanguage()
+                    transcribeAudioFile(provider, modelName, language, audioFile)
                 } else {
                     _recordingError.value = "Failed to record audio"
                     _recordingState.value = RecordingState.ERROR
@@ -202,9 +205,9 @@ class InputViewModel(
         return ic.getTextBeforeCursor(CONTEXT_CHAR_COUNT, 0)?.toString() ?: ""
     }
 
-    private fun transcribeAudioFile(config: AsrConfig, file: File) {
+    private fun transcribeAudioFile(provider: com.typefree.ime.data.ProviderConfig, modelName: String, language: String, file: File) {
         viewModelScope.launch {
-            val text = asrClient.transcribeApi(config, file)
+            val text = asrClient.transcribeApi(provider, modelName, language, file)
             if (text != null) {
                 service.currentInputConnection?.commitText(text, 1)
                 _recordingState.value = RecordingState.IDLE

@@ -52,7 +52,7 @@ class LLMClient {
     /**
      * Translates a given pinyin input into Chinese characters based on surrounding context.
      */
-    suspend fun translatePinyin(provider: ProviderConfig, pinyin: String, context: String): List<String> {
+    suspend fun translatePinyin(provider: ProviderConfig, modelName: String, pinyin: String, context: String): List<String> {
         if (provider.apiKey.isEmpty() && provider.id != "ollama") {
             return emptyList()
         }
@@ -62,9 +62,9 @@ class LLMClient {
 
         val rawResponse = try {
             if (provider.type == "anthropic") {
-                callAnthropic(provider, systemPrompt, userPrompt)
+                callAnthropic(provider, modelName, systemPrompt, userPrompt)
             } else {
-                callOpenAi(provider, systemPrompt, userPrompt)
+                callOpenAi(provider, modelName, systemPrompt, userPrompt)
             }
         } catch (e: Exception) {
             Log.e("LLMClient", "Error calling LLM for pinyin", e)
@@ -77,7 +77,7 @@ class LLMClient {
     /**
      * Predicts the next words or phrases based on the context.
      */
-    suspend fun predictNextWords(provider: ProviderConfig, context: String): List<String> {
+    suspend fun predictNextWords(provider: ProviderConfig, modelName: String, context: String): List<String> {
         if (provider.apiKey.isEmpty() && provider.id != "ollama") {
             return emptyList()
         }
@@ -87,9 +87,9 @@ class LLMClient {
 
         val rawResponse = try {
             if (provider.type == "anthropic") {
-                callAnthropic(provider, systemPrompt, userPrompt)
+                callAnthropic(provider, modelName, systemPrompt, userPrompt)
             } else {
-                callOpenAi(provider, systemPrompt, userPrompt)
+                callOpenAi(provider, modelName, systemPrompt, userPrompt)
             }
         } catch (e: Exception) {
             Log.e("LLMClient", "Error calling LLM for prediction", e)
@@ -99,16 +99,16 @@ class LLMClient {
         return parseJsonList(rawResponse)
     }
 
-    private suspend fun callOpenAi(provider: ProviderConfig, systemPrompt: String, userPrompt: String): String? = withContext(Dispatchers.IO) {
+    private suspend fun callOpenAi(provider: ProviderConfig, modelName: String, systemPrompt: String, userPrompt: String): String? = withContext(Dispatchers.IO) {
         val url = if (provider.baseUrl.endsWith("/chat/completions")) provider.baseUrl else "${provider.baseUrl.trimEnd('/')}/chat/completions"
         val requestBodyObj = OpenAiRequest(
-            model = provider.selectedModel,
+            model = modelName,
             messages = listOf(
                 OpenAiMessage("system", systemPrompt),
                 OpenAiMessage("user", userPrompt)
             ),
             // Try to force json object if supported by provider
-            response_format = if (provider.selectedModel.contains("gpt-4") || provider.selectedModel.contains("gpt-3.5")) ResponseFormat("json_object") else null
+            response_format = if (modelName.contains("gpt-4") || modelName.contains("gpt-3.5")) ResponseFormat("json_object") else null
         )
 
         val requestBodyJson = json.encodeToString(requestBodyObj)
@@ -145,10 +145,10 @@ class LLMClient {
         }
     }
 
-    private suspend fun callAnthropic(provider: ProviderConfig, systemPrompt: String, userPrompt: String): String? = withContext(Dispatchers.IO) {
+    private suspend fun callAnthropic(provider: ProviderConfig, modelName: String, systemPrompt: String, userPrompt: String): String? = withContext(Dispatchers.IO) {
         val url = if (provider.baseUrl.endsWith("/messages")) provider.baseUrl else "${provider.baseUrl.trimEnd('/')}/messages"
         val requestBodyObj = AnthropicRequest(
-            model = provider.selectedModel,
+            model = modelName,
             system = systemPrompt,
             messages = listOf(
                 OpenAiMessage("user", userPrompt)

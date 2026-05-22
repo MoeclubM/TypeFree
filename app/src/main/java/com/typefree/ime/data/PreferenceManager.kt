@@ -13,20 +13,10 @@ import kotlinx.serialization.json.Json
 data class ProviderConfig(
     val id: String,
     val name: String,
-    val apiKey: String = "",
     val baseUrl: String = "",
-    val selectedModel: String = "",
-    val models: List<String> = emptyList(),
-    val type: String = "openai"
-)
-
-@Serializable
-data class AsrConfig(
-    val mode: String = "local",
     val apiKey: String = "",
-    val baseUrl: String = "https://api.openai.com/v1",
-    val model: String = "whisper-1",
-    val language: String = "zh"
+    val type: String = "openai", // "openai" or "anthropic"
+    val models: List<String> = emptyList()
 )
 
 class PreferenceManager(context: Context) {
@@ -56,9 +46,15 @@ class PreferenceManager(context: Context) {
         private const val SECURE_PREFS_NAME = "TypeFreeSecurePrefs"
         private const val PLAIN_PREFS_NAME = "TypeFreePlainPrefs"
 
-        private const val KEY_PROVIDERS = "providers"
-        private const val KEY_ACTIVE_PROVIDER_ID = "active_provider_id"
-        private const val KEY_ASR_CONFIG = "asr_config"
+        private const val KEY_PROVIDERS = "providers_v2" // Use v2 to avoid decoding issues with legacy model
+        private const val KEY_PINYIN_PROVIDER_ID = "pinyin_provider_id"
+        private const val KEY_PINYIN_MODEL_NAME = "pinyin_model_name"
+        private const val KEY_CONTEXT_PROVIDER_ID = "context_provider_id"
+        private const val KEY_CONTEXT_MODEL_NAME = "context_model_name"
+        private const val KEY_ASR_PROVIDER_ID = "asr_provider_id"
+        private const val KEY_ASR_MODEL_NAME = "asr_model_name"
+        private const val KEY_ASR_MODE = "asr_mode"
+        private const val KEY_ASR_LANGUAGE = "asr_language"
         private const val KEY_CONTEXT_PREDICTION_ENABLED = "context_prediction_enabled"
         private const val KEY_PINYIN_LLM_ENABLED = "pinyin_llm_enabled"
 
@@ -67,15 +63,13 @@ class PreferenceManager(context: Context) {
                 id = "openai",
                 name = "OpenAI",
                 baseUrl = "https://api.openai.com/v1",
-                selectedModel = "gpt-4o-mini",
-                models = listOf("gpt-4o-mini", "gpt-4o", "gpt-3.5-turbo"),
-                type = "openai"
+                selectedModel = "gpt-4o-mini", // Fallback parameter for parsing, though we map directly now
+                models = listOf("gpt-4o-mini", "gpt-4o", "gpt-3.5-turbo", "whisper-1")
             ),
             ProviderConfig(
                 id = "anthropic",
                 name = "Anthropic",
                 baseUrl = "https://api.anthropic.com/v1",
-                selectedModel = "claude-3-5-haiku-20241022",
                 models = listOf("claude-3-5-haiku-20241022", "claude-3-5-sonnet-20241022", "claude-3-opus-20240229"),
                 type = "anthropic"
             ),
@@ -83,7 +77,6 @@ class PreferenceManager(context: Context) {
                 id = "deepseek",
                 name = "DeepSeek",
                 baseUrl = "https://api.deepseek.com/v1",
-                selectedModel = "deepseek-chat",
                 models = listOf("deepseek-chat", "deepseek-coder"),
                 type = "openai"
             ),
@@ -91,11 +84,20 @@ class PreferenceManager(context: Context) {
                 id = "ollama",
                 name = "Ollama (Local)",
                 baseUrl = "http://10.0.2.2:11434/v1",
-                selectedModel = "llama3",
                 models = listOf("llama3", "mistral", "qwen2"),
                 type = "openai"
             )
         )
+
+        // Add dummy extension constructor to keep compile clean in case of legacy usage
+        private fun ProviderConfig(
+            id: String,
+            name: String,
+            baseUrl: String,
+            selectedModel: String,
+            models: List<String>,
+            type: String
+        ) = ProviderConfig(id, name, baseUrl, "", type, models)
     }
 
     fun getProviders(): List<ProviderConfig> {
@@ -113,35 +115,78 @@ class PreferenceManager(context: Context) {
         securePrefs.edit().putString(KEY_PROVIDERS, jsonStr).apply()
     }
 
-    fun getActiveProviderId(): String {
-        return plainPrefs.getString(KEY_ACTIVE_PROVIDER_ID, "openai") ?: "openai"
+    fun getProvider(id: String): ProviderConfig? {
+        return getProviders().find { it.id == id }
     }
 
-    fun setActiveProviderId(id: String) {
-        plainPrefs.edit().putString(KEY_ACTIVE_PROVIDER_ID, id).apply()
+    // Pinyin Suggestions Feature Mappings
+    fun getPinyinProviderId(): String {
+        return plainPrefs.getString(KEY_PINYIN_PROVIDER_ID, "openai") ?: "openai"
     }
 
-    fun getActiveProvider(): ProviderConfig {
-        val providers = getProviders()
-        val activeId = getActiveProviderId()
-        return providers.find { it.id == activeId } ?: providers.firstOrNull() ?: DEFAULT_PROVIDERS.first()
+    fun setPinyinProviderId(id: String) {
+        plainPrefs.edit().putString(KEY_PINYIN_PROVIDER_ID, id).apply()
     }
 
-    fun getAsrConfig(): AsrConfig {
-        val asrJson = securePrefs.getString(KEY_ASR_CONFIG, null) ?: return AsrConfig()
-        return try {
-            json.decodeFromString<AsrConfig>(asrJson)
-        } catch (e: Exception) {
-            Log.e(TAG, "Failed to decode ASR config", e)
-            AsrConfig()
-        }
+    fun getPinyinModelName(): String {
+        return plainPrefs.getString(KEY_PINYIN_MODEL_NAME, "gpt-4o-mini") ?: "gpt-4o-mini"
     }
 
-    fun saveAsrConfig(config: AsrConfig) {
-        val jsonStr = json.encodeToString(config)
-        securePrefs.edit().putString(KEY_ASR_CONFIG, jsonStr).apply()
+    fun setPinyinModelName(name: String) {
+        plainPrefs.edit().putString(KEY_PINYIN_MODEL_NAME, name).apply()
     }
 
+    // Context Prediction Feature Mappings
+    fun getContextProviderId(): String {
+        return plainPrefs.getString(KEY_CONTEXT_PROVIDER_ID, "openai") ?: "openai"
+    }
+
+    fun setContextProviderId(id: String) {
+        plainPrefs.edit().putString(KEY_CONTEXT_PROVIDER_ID, id).apply()
+    }
+
+    fun getContextModelName(): String {
+        return plainPrefs.getString(KEY_CONTEXT_MODEL_NAME, "gpt-4o-mini") ?: "gpt-4o-mini"
+    }
+
+    fun setContextModelName(name: String) {
+        plainPrefs.edit().putString(KEY_CONTEXT_MODEL_NAME, name).apply()
+    }
+
+    // ASR Feature Mappings
+    fun getAsrProviderId(): String {
+        return plainPrefs.getString(KEY_ASR_PROVIDER_ID, "openai") ?: "openai"
+    }
+
+    fun setAsrProviderId(id: String) {
+        plainPrefs.edit().putString(KEY_ASR_PROVIDER_ID, id).apply()
+    }
+
+    fun getAsrModelName(): String {
+        return plainPrefs.getString(KEY_ASR_MODEL_NAME, "whisper-1") ?: "whisper-1"
+    }
+
+    fun setAsrModelName(name: String) {
+        plainPrefs.edit().putString(KEY_ASR_MODEL_NAME, name).apply()
+    }
+
+    fun getAsrMode(): String {
+        return plainPrefs.getString(KEY_ASR_MODE, "local") ?: "local"
+    }
+
+    fun setAsrMode(mode: String) {
+        plainPrefs.edit().putString(KEY_ASR_MODE, mode).apply()
+    }
+
+    fun getAsrLanguage(): String {
+        return plainPrefs.getString(KEY_ASR_LANGUAGE, "zh") ?: "zh"
+    }
+
+    fun setAsrLanguage(lang: String) {
+        plainPrefs.edit().putString(KEY_ASR_LANGUAGE, lang).apply()
+    }
+
+    // Toggles
     fun isContextPredictionEnabled(): Boolean {
         return plainPrefs.getBoolean(KEY_CONTEXT_PREDICTION_ENABLED, true)
     }

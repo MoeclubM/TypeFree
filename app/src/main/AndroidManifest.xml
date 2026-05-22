@@ -23,6 +23,17 @@
             </intent-filter>
         </activity>
 
+        <activity
+            android:name=".SettingsActivity"
+            android:exported="true"
+            android:label="TypeFree Settings"
+            android:theme="@style/Theme.TypeFree">
+            <intent-filter>
+                <action android:name="android.intent.action.APPLICATION_PREFERENCES" />
+                <category android:name="android.intent.category.DEFAULT" />
+            </intent-filter>
+        </activity>
+
         <service
             android:name=".TypeFreeIME"
             android:label="@string/ime_name"

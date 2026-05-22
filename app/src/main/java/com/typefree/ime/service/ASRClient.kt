@@ -8,7 +8,7 @@ import android.speech.RecognitionListener
 import android.speech.RecognizerIntent
 import android.speech.SpeechRecognizer
 import android.util.Log
-import com.typefree.ime.data.AsrConfig
+import com.typefree.ime.data.ProviderConfig
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import okhttp3.MediaType.Companion.toMediaType
@@ -145,27 +145,27 @@ class ASRClient(private val context: Context) {
         return audioFile
     }
 
-    suspend fun transcribeApi(config: AsrConfig, file: File): String? = withContext(Dispatchers.IO) {
+    suspend fun transcribeApi(provider: ProviderConfig, modelName: String, language: String, file: File): String? = withContext(Dispatchers.IO) {
         if (!file.exists()) return@withContext null
 
-        val url = if (config.baseUrl.endsWith("/audio/transcriptions")) config.baseUrl
-        else "${config.baseUrl.trimEnd('/')}/audio/transcriptions"
+        val url = if (provider.baseUrl.endsWith("/audio/transcriptions")) provider.baseUrl
+        else "${provider.baseUrl.trimEnd('/')}/audio/transcriptions"
 
         val requestFile = file.asRequestBody("audio/m4a".toMediaType())
 
         val requestBody = MultipartBody.Builder()
             .setType(MultipartBody.FORM)
             .addFormDataPart("file", file.name, requestFile)
-            .addFormDataPart("model", config.model)
-            .addFormDataPart("language", config.language)
+            .addFormDataPart("model", modelName)
+            .addFormDataPart("language", language)
             .build()
 
         val requestBuilder = Request.Builder()
             .url(url)
             .post(requestBody)
 
-        if (config.apiKey.isNotEmpty()) {
-            requestBuilder.addHeader("Authorization", "Bearer ${config.apiKey}")
+        if (provider.apiKey.isNotEmpty()) {
+            requestBuilder.addHeader("Authorization", "Bearer ${provider.apiKey}")
         }
 
         val request = requestBuilder.build()

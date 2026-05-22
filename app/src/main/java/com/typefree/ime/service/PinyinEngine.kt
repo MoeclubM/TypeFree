@@ -46,14 +46,16 @@ class PinyinEngine(private val context: Context) {
 
         // 2. Fetch LLM-refined candidates if enabled
         if (preferenceManager.isPinyinLlmEnabled()) {
-            val provider = preferenceManager.getActiveProvider()
+            val providerId = preferenceManager.getPinyinProviderId()
+            val provider = preferenceManager.getProvider(providerId) ?: PreferenceManager.DEFAULT_PROVIDERS.first()
+            val modelName = preferenceManager.getPinyinModelName()
             
             llmJob = scope.launch {
                 try {
                     // Slight delay to avoid hammering the LLM while rapid typing (debounce)
                     delay(300)
                     
-                    val aiWords = llmClient.translatePinyin(provider, pinyin, contextText)
+                    val aiWords = llmClient.translatePinyin(provider, modelName, pinyin, contextText)
                     if (aiWords.isNotEmpty()) {
                         val aiCandidates = aiWords.map { Candidate(it, isAi = true) }
                         
@@ -86,12 +88,14 @@ class PinyinEngine(private val context: Context) {
             return
         }
 
-        val provider = preferenceManager.getActiveProvider()
+        val providerId = preferenceManager.getContextProviderId()
+        val provider = preferenceManager.getProvider(providerId) ?: PreferenceManager.DEFAULT_PROVIDERS.first()
+        val modelName = preferenceManager.getContextModelName()
         
         llmJob = scope.launch {
             try {
                 // Fetch predictions
-                val predictedWords = llmClient.predictNextWords(provider, contextText)
+                val predictedWords = llmClient.predictNextWords(provider, modelName, contextText)
                 if (predictedWords.isNotEmpty()) {
                     val candidates = predictedWords.map { Candidate(it, isAi = true) }
                     withContext(Dispatchers.Main) {
