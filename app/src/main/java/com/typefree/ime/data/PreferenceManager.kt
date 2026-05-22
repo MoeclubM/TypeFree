@@ -63,7 +63,7 @@ class PreferenceManager(context: Context) {
                 id = "openai",
                 name = "OpenAI",
                 baseUrl = "https://api.openai.com/v1",
-                selectedModel = "gpt-4o-mini", // Fallback parameter for parsing, though we map directly now
+                type = "openai",
                 models = listOf("gpt-4o-mini", "gpt-4o", "gpt-3.5-turbo", "whisper-1")
             ),
             ProviderConfig(
