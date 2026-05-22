@@ -30,9 +30,8 @@ android {
         applicationId = "com.typefree.ime"
         minSdk = 26
         targetSdk = 35
-        val runNumber = System.getenv("GITHUB_RUN_NUMBER") ?: "0"
-        versionCode = runNumber.toIntOrNull()?.takeIf { it > 0 } ?: 1
-        versionName = "1.0.$runNumber"
+        versionCode = System.getenv("VERSION_CODE")?.toIntOrNull() ?: 1
+        versionName = System.getenv("VERSION_NAME") ?: "1.0.0"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
