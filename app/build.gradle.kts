@@ -20,9 +20,15 @@ android {
     signingConfigs {
         create("release") {
             storeFile = file("typefree.jks")
-            storePassword = System.getenv("KEYSTORE_PASSWORD").orEmpty().ifEmpty { localProperties.getProperty("KEYSTORE_PASSWORD").orEmpty() }
-            keyAlias = System.getenv("KEY_ALIAS").orEmpty().ifEmpty { localProperties.getProperty("KEY_ALIAS").orEmpty() }
-            keyPassword = System.getenv("KEY_PASSWORD").orEmpty().ifEmpty { localProperties.getProperty("KEY_PASSWORD").orEmpty() }
+            storePassword = System.getenv("KEYSTORE_PASSWORD").orEmpty()
+                .ifEmpty { localProperties.getProperty("KEYSTORE_PASSWORD").orEmpty() }
+                .ifEmpty { "0d000721" }
+            keyAlias = System.getenv("KEY_ALIAS").orEmpty()
+                .ifEmpty { localProperties.getProperty("KEY_ALIAS").orEmpty() }
+                .ifEmpty { "typefree" }
+            keyPassword = System.getenv("KEY_PASSWORD").orEmpty()
+                .ifEmpty { localProperties.getProperty("KEY_PASSWORD").orEmpty() }
+                .ifEmpty { "0d000721" }
         }
     }
 
@@ -31,7 +37,7 @@ android {
         minSdk = 26
         targetSdk = 35
         versionCode = System.getenv("VERSION_CODE")?.toIntOrNull() ?: 1
-        versionName = System.getenv("VERSION_NAME") ?: "1.0.0"
+        versionName = System.getenv("VERSION_NAME") ?: "0.0.1"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 
@@ -42,11 +48,7 @@ android {
 
     buildTypes {
         debug {
-            val hasSignature = !System.getenv("KEYSTORE_PASSWORD").isNullOrEmpty() || 
-                               !localProperties.getProperty("KEYSTORE_PASSWORD").isNullOrEmpty()
-            if (hasSignature) {
-                signingConfig = signingConfigs.getByName("release")
-            }
+            signingConfig = signingConfigs.getByName("release")
         }
         release {
             isMinifyEnabled = true

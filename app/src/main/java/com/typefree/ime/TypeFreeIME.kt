@@ -50,28 +50,20 @@ class TypeFreeIME : InputMethodService(),
     }
 
     override fun onCreate() {
-        val defaultHandler = Thread.getDefaultUncaughtExceptionHandler()
-        Thread.setDefaultUncaughtExceptionHandler { thread, throwable ->
-            try {
-                PreferenceManager(this).setCrashLog(throwable.stackTraceToString())
-            } catch (e: Exception) {
-                // Prevent crash loop if saving fails
-            }
-            defaultHandler?.uncaughtException(thread, throwable)
-        }
-
         super.onCreate()
         savedStateRegistryController.performRestore(null)
         lifecycleRegistry.handleLifecycleEvent(Lifecycle.Event.ON_CREATE)
 
         preferenceManager = PreferenceManager(this)
-        pinyinEngine = PinyinEngine(this)
+        pinyinEngine = PinyinEngine(this, preferenceManager)
         asrClient = ASRClient(this)
     }
 
     override fun onCreateInputView(): View {
-        lifecycleRegistry.handleLifecycleEvent(Lifecycle.Event.ON_START)
-        lifecycleRegistry.handleLifecycleEvent(Lifecycle.Event.ON_RESUME)
+        if (lifecycleRegistry.currentState == Lifecycle.State.CREATED) {
+            lifecycleRegistry.handleLifecycleEvent(Lifecycle.Event.ON_START)
+            lifecycleRegistry.handleLifecycleEvent(Lifecycle.Event.ON_RESUME)
+        }
 
         val composeView = ComposeView(this)
         composeView.setViewTreeLifecycleOwner(this)
@@ -120,8 +112,20 @@ class TypeFreeIME : InputMethodService(),
         viewModel.onStartInputView()
     }
 
+    override fun onWindowShown() {
+        super.onWindowShown()
+        if (lifecycleRegistry.currentState == Lifecycle.State.CREATED) {
+            lifecycleRegistry.handleLifecycleEvent(Lifecycle.Event.ON_START)
+            lifecycleRegistry.handleLifecycleEvent(Lifecycle.Event.ON_RESUME)
+        }
+    }
+
     override fun onWindowHidden() {
         super.onWindowHidden()
+        if (lifecycleRegistry.currentState.isAtLeast(Lifecycle.State.STARTED)) {
+            lifecycleRegistry.handleLifecycleEvent(Lifecycle.Event.ON_PAUSE)
+            lifecycleRegistry.handleLifecycleEvent(Lifecycle.Event.ON_STOP)
+        }
         viewModel.onWindowHidden()
     }
 

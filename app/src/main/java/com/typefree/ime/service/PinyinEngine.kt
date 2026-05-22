@@ -11,9 +11,8 @@ data class Candidate(
     val isAi: Boolean = false
 )
 
-class PinyinEngine(private val context: Context) {
+class PinyinEngine(context: Context, private val preferenceManager: PreferenceManager) {
     private val pinyinDict = PinyinDict(context)
-    private val preferenceManager = PreferenceManager(context)
     private val llmClient = LLMClient()
     
     private val scope = CoroutineScope(Dispatchers.Main + SupervisorJob())

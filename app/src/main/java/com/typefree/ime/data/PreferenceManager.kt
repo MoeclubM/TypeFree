@@ -4,7 +4,7 @@ import android.content.Context
 import android.content.SharedPreferences
 import android.util.Log
 import androidx.security.crypto.EncryptedSharedPreferences
-import androidx.security.crypto.MasterKey
+import androidx.security.crypto.MasterKeys
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
@@ -23,19 +23,17 @@ class PreferenceManager(context: Context) {
     private val json = Json { ignoreUnknownKeys = true }
 
     private val securePrefs: SharedPreferences = try {
-        val masterKey = MasterKey.Builder(context)
-            .setKeyScheme(MasterKey.KeyScheme.AES256_GCM)
-            .build()
+        val masterKeyAlias = MasterKeys.getOrCreate(MasterKeys.AES256_GCM_SPEC)
         EncryptedSharedPreferences.create(
-            context,
             SECURE_PREFS_NAME,
-            masterKey,
+            masterKeyAlias,
+            context,
             EncryptedSharedPreferences.PrefKeyEncryptionScheme.AES256_SIV,
             EncryptedSharedPreferences.PrefValueEncryptionScheme.AES256_GCM
         )
-    } catch (e: Exception) {
+    } catch (e: Throwable) {
         Log.w(TAG, "EncryptedSharedPreferences unavailable, falling back to plaintext", e)
-        context.getSharedPreferences(SECURE_PREFS_NAME, Context.MODE_PRIVATE)
+        context.getSharedPreferences(SECURE_PREFS_NAME + "_fallback", Context.MODE_PRIVATE)
     }
 
     private val plainPrefs: SharedPreferences =
@@ -130,22 +128,6 @@ class PreferenceManager(context: Context) {
             } catch (ex: Exception) {
                 Log.e(TAG, "Failed to write plain providers fallback", ex)
             }
-        }
-    }
-
-    fun getCrashLog(): String? {
-        return try {
-            plainPrefs.getString("last_crash_log", null)
-        } catch (e: Exception) {
-            null
-        }
-    }
-
-    fun setCrashLog(log: String?) {
-        try {
-            plainPrefs.edit().putString("last_crash_log", log).apply()
-        } catch (e: Exception) {
-            Log.e(TAG, "Failed to save crash log", e)
         }
     }
 
