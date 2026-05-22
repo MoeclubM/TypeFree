@@ -17,6 +17,7 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -45,6 +46,16 @@ class MainActivity : ComponentActivity() {
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
+        val defaultHandler = Thread.getDefaultUncaughtExceptionHandler()
+        Thread.setDefaultUncaughtExceptionHandler { thread, throwable ->
+            try {
+                com.typefree.ime.data.PreferenceManager(this).setCrashLog(throwable.stackTraceToString())
+            } catch (e: Exception) {
+                // Ignore
+            }
+            defaultHandler?.uncaughtException(thread, throwable)
+        }
+
         super.onCreate(savedInstanceState)
 
         setContent {
@@ -53,6 +64,7 @@ class MainActivity : ComponentActivity() {
                 var isImeEnabled by remember { mutableStateOf(false) }
                 var isImeSelected by remember { mutableStateOf(false) }
                 var hasMicPermission by remember { mutableStateOf(false) }
+                var crashLog by remember { mutableStateOf<String?>(null) }
 
                 // Periodic checks when activity starts/resumes
                 val lifecycleOwner = LocalLifecycleOwner.current
@@ -64,6 +76,7 @@ class MainActivity : ComponentActivity() {
                                 isImeSelected = selected
                                 hasMicPermission = mic
                             }
+                            crashLog = com.typefree.ime.data.PreferenceManager(this@MainActivity).getCrashLog()
                         }
                     }
                     lifecycleOwner.lifecycle.addObserver(observer)
@@ -110,6 +123,69 @@ class MainActivity : ComponentActivity() {
                             textAlign = TextAlign.Center,
                             modifier = Modifier.fillMaxWidth()
                         )
+
+                        crashLog?.let { log ->
+                            Card(
+                                colors = CardDefaults.cardColors(
+                                    containerColor = MaterialTheme.colorScheme.errorContainer
+                                ),
+                                shape = RoundedCornerShape(12.dp),
+                                modifier = Modifier.fillMaxWidth()
+                            ) {
+                                Column(
+                                    modifier = Modifier.padding(16.dp),
+                                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                                ) {
+                                    Row(
+                                        modifier = Modifier.fillMaxWidth(),
+                                        horizontalArrangement = Arrangement.SpaceBetween,
+                                        verticalAlignment = Alignment.CenterVertically
+                                    ) {
+                                        Text(
+                                            text = "⚠️ 检测到应用/输入法发生闪退：",
+                                            fontWeight = FontWeight.Bold,
+                                            fontSize = 14.sp,
+                                            color = MaterialTheme.colorScheme.onErrorContainer
+                                        )
+                                        IconButton(
+                                            onClick = {
+                                                com.typefree.ime.data.PreferenceManager(this@MainActivity).setCrashLog(null)
+                                                crashLog = null
+                                            },
+                                            modifier = Modifier.size(24.dp)
+                                        ) {
+                                            Text("✕", fontSize = 14.sp, fontWeight = FontWeight.Bold)
+                                        }
+                                    }
+                                    
+                                    SelectionContainer {
+                                        Text(
+                                            text = log,
+                                            fontSize = 11.sp,
+                                            fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace,
+                                            color = MaterialTheme.colorScheme.onErrorContainer,
+                                            modifier = Modifier.heightIn(max = 180.dp).verticalScroll(rememberScrollState())
+                                        )
+                                    }
+                                    
+                                    Button(
+                                        onClick = {
+                                            val clipboard = getSystemService(Context.CLIPBOARD_SERVICE) as android.content.ClipboardManager
+                                            val clip = android.content.ClipData.newPlainText("Crash Log", log)
+                                            clipboard.setPrimaryClip(clip)
+                                            Toast.makeText(this@MainActivity, "日志已复制到剪贴板！", Toast.LENGTH_SHORT).show()
+                                        },
+                                        colors = ButtonDefaults.buttonColors(
+                                            containerColor = MaterialTheme.colorScheme.onErrorContainer,
+                                            contentColor = MaterialTheme.colorScheme.errorContainer
+                                        ),
+                                        modifier = Modifier.fillMaxWidth()
+                                    ) {
+                                        Text("复制崩溃日志并反馈", fontSize = 12.sp)
+                                    }
+                                }
+                            }
+                        }
 
                         // Step Cards
                         StepRow(

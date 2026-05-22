@@ -101,7 +101,16 @@ class PreferenceManager(context: Context) {
     }
 
     fun getProviders(): List<ProviderConfig> {
-        val providersJson = securePrefs.getString(KEY_PROVIDERS, null) ?: return DEFAULT_PROVIDERS
+        val providersJson = try {
+            securePrefs.getString(KEY_PROVIDERS, null)
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to read secure providers, falling back to plainPrefs", e)
+            try {
+                plainPrefs.getString(KEY_PROVIDERS, null)
+            } catch (ex: Exception) {
+                null
+            }
+        } ?: return DEFAULT_PROVIDERS
         return try {
             json.decodeFromString<List<ProviderConfig>>(providersJson)
         } catch (e: Exception) {
@@ -112,7 +121,32 @@ class PreferenceManager(context: Context) {
 
     fun saveProviders(providers: List<ProviderConfig>) {
         val jsonStr = json.encodeToString(providers)
-        securePrefs.edit().putString(KEY_PROVIDERS, jsonStr).apply()
+        try {
+            securePrefs.edit().putString(KEY_PROVIDERS, jsonStr).apply()
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to write secure providers, falling back to plainPrefs", e)
+            try {
+                plainPrefs.edit().putString(KEY_PROVIDERS, jsonStr).apply()
+            } catch (ex: Exception) {
+                Log.e(TAG, "Failed to write plain providers fallback", ex)
+            }
+        }
+    }
+
+    fun getCrashLog(): String? {
+        return try {
+            plainPrefs.getString("last_crash_log", null)
+        } catch (e: Exception) {
+            null
+        }
+    }
+
+    fun setCrashLog(log: String?) {
+        try {
+            plainPrefs.edit().putString("last_crash_log", log).apply()
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to save crash log", e)
+        }
     }
 
     fun getProvider(id: String): ProviderConfig? {

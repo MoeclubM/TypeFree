@@ -50,6 +50,16 @@ class TypeFreeIME : InputMethodService(),
     }
 
     override fun onCreate() {
+        val defaultHandler = Thread.getDefaultUncaughtExceptionHandler()
+        Thread.setDefaultUncaughtExceptionHandler { thread, throwable ->
+            try {
+                PreferenceManager(this).setCrashLog(throwable.stackTraceToString())
+            } catch (e: Exception) {
+                // Prevent crash loop if saving fails
+            }
+            defaultHandler?.uncaughtException(thread, throwable)
+        }
+
         super.onCreate()
         savedStateRegistryController.performRestore(null)
         lifecycleRegistry.handleLifecycleEvent(Lifecycle.Event.ON_CREATE)

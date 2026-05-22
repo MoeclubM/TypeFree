@@ -20,6 +20,11 @@ jobs:
           distribution: 'temurin'
           cache: gradle
 
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
       - name: Calculate Version
         run: |
           git fetch --prune --unshallow --tags || git fetch --tags || true
