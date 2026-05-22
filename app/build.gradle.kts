@@ -1,3 +1,5 @@
+import java.util.Properties
+
 plugins {
     alias(libs.plugins.android.application)
     alias(libs.plugins.kotlin.android)
@@ -8,6 +10,21 @@ plugins {
 android {
     namespace = "com.typefree.ime"
     compileSdk = 35
+
+    val localProperties = Properties()
+    val localPropertiesFile = rootProject.file("local.properties")
+    if (localPropertiesFile.exists()) {
+        localPropertiesFile.inputStream().use { localProperties.load(it) }
+    }
+
+    signingConfigs {
+        create("release") {
+            storeFile = file("typefree.jks")
+            storePassword = System.getenv("KEYSTORE_PASSWORD").orEmpty().ifEmpty { localProperties.getProperty("KEYSTORE_PASSWORD").orEmpty() }
+            keyAlias = System.getenv("KEY_ALIAS").orEmpty().ifEmpty { localProperties.getProperty("KEY_ALIAS").orEmpty() }
+            keyPassword = System.getenv("KEY_PASSWORD").orEmpty().ifEmpty { localProperties.getProperty("KEY_PASSWORD").orEmpty() }
+        }
+    }
 
     defaultConfig {
         applicationId = "com.typefree.ime"
@@ -26,6 +43,7 @@ android {
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
             )
+            signingConfig = signingConfigs.getByName("release")
         }
     }
     compileOptions {
