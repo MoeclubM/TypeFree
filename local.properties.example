@@ -1,0 +1,8 @@
+# TypeFree local.properties example
+# 复制此文件为 local.properties 并填入实际值
+# Copy this file to local.properties and fill in real values
+
+# 签名密钥密码 / Signing key passwords
+KEYSTORE_PASSWORD=your_keystore_password
+KEY_ALIAS=your_key_alias
+KEY_PASSWORD=your_key_password
