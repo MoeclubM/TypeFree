@@ -1,6 +1,9 @@
 package com.typefree.ime
 
 import android.content.Intent
+import androidx.lifecycle.setViewTreeLifecycleOwner
+import androidx.lifecycle.setViewTreeViewModelStoreOwner
+import androidx.savedstate.setViewTreeSavedStateRegistryOwner
 import android.inputmethodservice.InputMethodService
 import android.view.View
 import android.view.inputmethod.EditorInfo
@@ -63,7 +66,6 @@ class TypeFreeIME : InputMethodService(),
         val composeView = ComposeView(this)
         composeView.setViewTreeLifecycleOwner(this)
         composeView.setViewTreeViewModelStoreOwner(this)
-        composeView.setViewTreeSavedStateRegistryOwner(this)
 
         composeView.setContent {
             TypeFreeTheme {

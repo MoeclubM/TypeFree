@@ -31,3 +31,6 @@
 
 # Keep InputMethodService entry
 -keep class com.typefree.ime.TypeFreeIME { *; }
+
+# Ignore missing ErrorProne annotations referenced by Tink
+-dontwarn com.google.errorprone.annotations.**
