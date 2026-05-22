@@ -23,7 +23,7 @@ jobs:
       - name: Calculate Version
         run: |
           git fetch --prune --unshallow --tags || git fetch --tags || true
-          LATEST_TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "0.0.0")
+          LATEST_TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "1.0.0")
           CLEAN_TAG=${LATEST_TAG#v}
           
           if git rev-parse "$LATEST_TAG" >/dev/null 2>&1; then
@@ -33,7 +33,7 @@ jobs:
           fi
           
           IFS='.' read -r major minor patch <<< "$CLEAN_TAG"
-          major=${major:-0}
+          major=${major:-1}
           minor=${minor:-0}
           patch=${patch:-0}
           
@@ -49,15 +49,11 @@ jobs:
       - name: Grant execute permission for gradlew
         run: chmod +x gradlew
 
-      - name: Build Release APK
-        env:
-          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
-          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
-          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
-        run: ./gradlew assembleRelease
+      - name: Build Debug APK
+        run: ./gradlew assembleDebug
 
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4
         with:
-          name: app-release-${{ env.VERSION_NAME }}
-          path: app/build/outputs/apk/release/app-release.apk
+          name: app-debug-${{ env.VERSION_NAME }}
+          path: app/build/outputs/apk/debug/app-debug.apk
