@@ -37,9 +37,12 @@ jobs:
           minor=${minor:-0}
           patch=${patch:-1}
           
-          NEW_PATCH=$((patch + COMMITS_SINCE))
-          VERSION_NAME="${major}.${minor}.${NEW_PATCH}"
-          VERSION_CODE=$((COMMITS_SINCE + 1))
+          if [ "$COMMITS_SINCE" -eq 0 ]; then
+            VERSION_NAME="${major}.${minor}.${patch}"
+          else
+            VERSION_NAME="${major}.${minor}.${patch}.${COMMITS_SINCE}"
+          fi
+          VERSION_CODE=$(git rev-list --count HEAD 2>/dev/null || echo "1")
           
           echo "VERSION_NAME=$VERSION_NAME" >> $GITHUB_ENV
           echo "VERSION_CODE=$VERSION_CODE" >> $GITHUB_ENV
