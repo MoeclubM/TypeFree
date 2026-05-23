@@ -20,13 +20,18 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.Checkbox
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.ListItem
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
@@ -205,11 +210,11 @@ class SettingsActivity : ComponentActivity() {
 
         if (preferenceManager.getPinyinProviderId() == providerId) {
             preferenceManager.setPinyinProviderId("openai")
-            preferenceManager.setPinyinModelName("gpt5.4flash")
+            preferenceManager.setPinyinModelName("")
         }
         if (preferenceManager.getContextProviderId() == providerId) {
             preferenceManager.setContextProviderId("openai")
-            preferenceManager.setContextModelName("gpt5.4flash")
+            preferenceManager.setContextModelName("")
         }
         if (preferenceManager.getAsrProviderId() == providerId) {
             preferenceManager.setAsrProviderId("openai")
@@ -228,7 +233,6 @@ class SettingsActivity : ComponentActivity() {
     ) {
         lifecycleScope.launch {
             val result = LLMClient().detectProvider(provider)
-            saveProvider(provider.copy(models = result.models, capabilities = result.capabilities))
             Toast.makeText(this@SettingsActivity, result.message, Toast.LENGTH_LONG).show()
             onResult(result)
         }
@@ -248,9 +252,9 @@ private data class SettingsSnapshot(
     val pinyinLlmEnabled: Boolean = true,
     val contextPredictionEnabled: Boolean = true,
     val pinyinProviderId: String = "openai",
-    val pinyinModelName: String = "gpt5.4flash",
+    val pinyinModelName: String = "",
     val contextProviderId: String = "openai",
-    val contextModelName: String = "gpt5.4flash",
+    val contextModelName: String = "",
     val asrProviderId: String = "openai",
     val asrModelName: String = "whisper-1",
     val asrMode: String = "local",
@@ -332,8 +336,11 @@ private fun SettingsApp(
                     )
                 },
                 navigationIcon = {
-                    TextButton(onClick = onBack) {
-                        Text("返回")
+                    IconButton(onClick = onBack) {
+                        Icon(
+                            imageVector = Icons.AutoMirrored.Filled.ArrowBack,
+                            contentDescription = "返回"
+                        )
                     }
                 },
                 actions = {
@@ -377,6 +384,7 @@ private fun SettingsApp(
             providers = snapshot.providers,
             onDismiss = onDismissMapping,
             onSave = onSaveMapping,
+            onSaveProvider = onSaveProvider,
             onDetectProvider = onDetectProvider
         )
     }
@@ -426,40 +434,40 @@ private fun SettingsMainScreen(
 
         SectionTitle("AI 输入增强服务")
         SwitchSettingRow(
-            title = "拼音 AI 候选词",
-            summary = "使用已绑定模型补充拼音候选词。",
+            title = "AI 候选词",
+            summary = "输入拼音时调用已绑定模型生成候选词。",
             checked = snapshot.pinyinLlmEnabled,
             onCheckedChange = onTogglePinyinAi
         )
         SwitchSettingRow(
-            title = "上下文联想预测",
-            summary = "根据已输入内容预测下一个词语。",
+            title = "AI 上下文联想",
+            summary = "根据光标前文本预测接下来可能输入的内容。",
             checked = snapshot.contextPredictionEnabled,
             onCheckedChange = onToggleContextPrediction
         )
 
         SectionTitle("模型功能绑定")
         ClickSettingRow(
-            title = "拼音 AI 联想模型",
+            title = "AI 候选词模型",
             summary = bindingSummary(snapshot, snapshot.pinyinProviderId, snapshot.pinyinModelName)
         ) {
             onOpenMapping(
                 MappingDialogState(
                     target = BindingTarget.PINYIN,
-                    title = "绑定拼音 AI 候选模型",
+                    title = "绑定 AI 候选词模型",
                     providerId = snapshot.pinyinProviderId,
                     modelName = snapshot.pinyinModelName
                 )
             )
         }
         ClickSettingRow(
-            title = "上下文联想模型",
+            title = "AI 上下文联想模型",
             summary = bindingSummary(snapshot, snapshot.contextProviderId, snapshot.contextModelName)
         ) {
             onOpenMapping(
                 MappingDialogState(
                     target = BindingTarget.CONTEXT,
-                    title = "绑定上下文预测模型",
+                    title = "绑定 AI 上下文联想模型",
                     providerId = snapshot.contextProviderId,
                     modelName = snapshot.contextModelName
                 )
@@ -574,6 +582,7 @@ private fun ProviderDetailScreen(
     var detecting by remember(provider.id) { mutableStateOf(false) }
     var showAddModelDialog by remember(provider.id) { mutableStateOf(false) }
     var showDeleteDialog by remember(provider.id) { mutableStateOf(false) }
+    var detectedModelsDialog by remember(provider.id) { mutableStateOf<ProviderDetectionResult?>(null) }
     val context = LocalContext.current
 
     fun buildProvider(): ProviderConfig {
@@ -658,8 +667,13 @@ private fun ProviderDetailScreen(
                     detecting = true
                     onDetectProvider(buildProvider()) { result ->
                         detecting = false
-                        models = result.models
                         capabilities = result.capabilities
+                        val newModels = result.models.filterNot { it in models }
+                        if (newModels.isEmpty()) {
+                            onSaveProvider(buildProvider().copy(capabilities = result.capabilities))
+                        } else {
+                            detectedModelsDialog = result.copy(models = newModels)
+                        }
                     }
                 },
                 modifier = Modifier.weight(1f),
@@ -671,7 +685,7 @@ private fun ProviderDetailScreen(
                         strokeWidth = 2.dp
                     )
                 } else {
-                    Text("探测模型")
+                    Text("获取模型列表")
                 }
             }
         }
@@ -683,7 +697,7 @@ private fun ProviderDetailScreen(
         )
         if (models.isEmpty()) {
             Text(
-                text = "暂无模型。可以手动添加，或点击探测模型自动获取。",
+                text = "暂无模型。可以手动添加，或点击获取模型列表后选择添加。",
                 style = MaterialTheme.typography.bodyMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
@@ -736,6 +750,22 @@ private fun ProviderDetailScreen(
                     onSaveProvider(buildProvider().copy(models = updatedModels))
                 }
                 showAddModelDialog = false
+            }
+        )
+    }
+
+    detectedModelsDialog?.let { result ->
+        ModelSelectionDialog(
+            title = "选择要添加的模型",
+            detectedModels = result.models,
+            existingModels = models,
+            onDismiss = { detectedModelsDialog = null },
+            onAddSelected = { selected ->
+                val updatedModels = (models + selected).distinct()
+                models = updatedModels
+                capabilities = result.capabilities
+                onSaveProvider(buildProvider().copy(models = updatedModels, capabilities = result.capabilities))
+                detectedModelsDialog = null
             }
         )
     }
@@ -850,11 +880,101 @@ private fun SectionHeaderWithAction(
 }
 
 @Composable
+private fun ModelSelectionDialog(
+    title: String,
+    detectedModels: List<String>,
+    existingModels: List<String>,
+    onDismiss: () -> Unit,
+    onAddSelected: (List<String>) -> Unit
+) {
+    val uniqueModels = detectedModels.distinct()
+    var selectedModels by remember(uniqueModels, existingModels) { mutableStateOf(emptySet<String>()) }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text(title) },
+        text = {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(4.dp)
+            ) {
+                if (uniqueModels.isEmpty()) {
+                    Text(
+                        text = "没有探测到可添加的模型。",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                } else {
+                    uniqueModels.forEach { model ->
+                        val alreadyAdded = model in existingModels
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clickable(enabled = !alreadyAdded) {
+                                    selectedModels = if (model in selectedModels) {
+                                        selectedModels - model
+                                    } else {
+                                        selectedModels + model
+                                    }
+                                }
+                                .padding(vertical = 8.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Checkbox(
+                                checked = alreadyAdded || model in selectedModels,
+                                onCheckedChange = if (alreadyAdded) {
+                                    null
+                                } else {
+                                    { checked ->
+                                        selectedModels = if (checked) {
+                                            selectedModels + model
+                                        } else {
+                                            selectedModels - model
+                                        }
+                                    }
+                                }
+                            )
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Column {
+                                Text(text = model, style = MaterialTheme.typography.bodyLarge)
+                                if (alreadyAdded) {
+                                    Text(
+                                        text = "已在模型列表中",
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(
+                onClick = { onAddSelected(selectedModels.toList()) },
+                enabled = selectedModels.isNotEmpty()
+            ) {
+                Text("添加选中")
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) {
+                Text("取消")
+            }
+        }
+    )
+}
+
+@Composable
 private fun MappingDialog(
     state: MappingDialogState,
     providers: List<ProviderConfig>,
     onDismiss: () -> Unit,
     onSave: (BindingTarget, String, String) -> Unit,
+    onSaveProvider: (ProviderConfig) -> Unit,
     onDetectProvider: (ProviderConfig, (ProviderDetectionResult) -> Unit) -> Unit
 ) {
     if (providers.isEmpty()) {
@@ -876,12 +996,14 @@ private fun MappingDialog(
     }
     var selectedModel by remember(state) { mutableStateOf(state.modelName) }
     var detecting by remember(state) { mutableStateOf(false) }
+    var detectedModels by remember(state, selectedProviderId) { mutableStateOf<List<String>>(emptyList()) }
+    var detectedCapabilities by remember(state, selectedProviderId) { mutableStateOf<ProviderCapabilities?>(null) }
 
     val selectedProvider = providers.firstOrNull { it.id == selectedProviderId } ?: providers.first()
-    LaunchedEffect(selectedProviderId, providers) {
-        val models = selectedProvider.models
-        if (selectedModel !in models) {
-            selectedModel = models.firstOrNull().orEmpty()
+    val availableModels = (selectedProvider.models + detectedModels).distinct()
+    LaunchedEffect(selectedProviderId, providers, detectedModels) {
+        if (selectedModel !in availableModels) {
+            selectedModel = availableModels.firstOrNull().orEmpty()
         }
     }
 
@@ -905,14 +1027,14 @@ private fun MappingDialog(
                 }
 
                 Text("模型", style = MaterialTheme.typography.labelLarge)
-                if (selectedProvider.models.isEmpty()) {
+                if (availableModels.isEmpty()) {
                     Text(
                         text = "当前服务商没有模型。点击获取模型列表，或在服务商详情手动添加。",
                         style = MaterialTheme.typography.bodyMedium,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
                 } else {
-                    selectedProvider.models.forEach { model ->
+                    availableModels.forEach { model ->
                         RadioSettingRow(
                             title = model,
                             selected = model == selectedModel,
@@ -931,6 +1053,8 @@ private fun MappingDialog(
                         detecting = true
                         onDetectProvider(selectedProvider) {
                             detecting = false
+                            detectedModels = it.models
+                            detectedCapabilities = it.capabilities
                         }
                     },
                     enabled = !detecting && selectedProvider.baseUrl.isNotBlank()
@@ -945,7 +1069,17 @@ private fun MappingDialog(
         },
         confirmButton = {
             TextButton(
-                onClick = { onSave(state.target, selectedProviderId, selectedModel) },
+                onClick = {
+                    if (selectedModel !in selectedProvider.models || detectedCapabilities != null) {
+                        onSaveProvider(
+                            selectedProvider.copy(
+                                models = (selectedProvider.models + selectedModel).distinct(),
+                                capabilities = detectedCapabilities ?: selectedProvider.capabilities
+                            )
+                        )
+                    }
+                    onSave(state.target, selectedProviderId, selectedModel)
+                },
                 enabled = selectedModel.isNotBlank()
             ) {
                 Text("绑定")
@@ -1108,8 +1242,9 @@ private fun TextInputDialog(
 private fun bindingSummary(snapshot: SettingsSnapshot, providerId: String, modelName: String): String {
     val provider = snapshot.providers.find { it.id == providerId }
     val providerName = provider?.name ?: providerId
+    val modelLabel = modelName.ifBlank { "未绑定模型" }
     val readiness = provider?.let { providerReadiness(it) }.orEmpty()
-    return listOf("$providerName / $modelName", readiness)
+    return listOf("$providerName / $modelLabel", readiness)
         .filter { it.isNotBlank() }
         .joinToString(" | ")
 }
@@ -1117,7 +1252,7 @@ private fun bindingSummary(snapshot: SettingsSnapshot, providerId: String, model
 private fun providerReadiness(provider: ProviderConfig): String {
     return when {
         provider.baseUrl.isBlank() -> "未配置 Base URL"
-        provider.apiKey.isBlank() && !provider.baseUrl.isLocalEndpoint() -> "未配置 API Key，AI 候选不会请求网络"
+        provider.apiKey.isBlank() && !provider.baseUrl.isLocalEndpoint() -> "未配置 API Key，AI 功能不会请求网络"
         provider.models.isEmpty() -> "未配置模型列表"
         else -> ""
     }
@@ -1135,7 +1270,7 @@ private fun capabilitiesSummary(capabilities: ProviderCapabilities): String {
     if (capabilities.supportsThinkingBudget) enabled.add("思考预算")
     if (capabilities.supportsAsr) enabled.add("语音识别")
     return if (enabled.isEmpty()) {
-        "未探测或未声明。点击探测模型后会保存模型列表和 API 能力。"
+        "未探测或未声明。点击获取模型列表后会探测模型和 API 能力。"
     } else {
         enabled.joinToString(" / ")
     }

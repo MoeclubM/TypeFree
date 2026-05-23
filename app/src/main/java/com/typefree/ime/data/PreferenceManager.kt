@@ -73,7 +73,7 @@ class PreferenceManager(context: Context) {
                 name = "OpenAI",
                 baseUrl = "https://api.openai.com/v1",
                 type = "openai_responses",
-                models = listOf("gpt5.4flash"),
+                models = emptyList(),
                 capabilities = ProviderCapabilities(
                     supportsModelList = true,
                     supportsStructuredOutput = true,
@@ -86,7 +86,7 @@ class PreferenceManager(context: Context) {
                 id = "anthropic",
                 name = "Anthropic",
                 baseUrl = "https://api.anthropic.com/v1",
-                models = listOf("claude4.5-haiku"),
+                models = emptyList(),
                 type = "anthropic",
                 capabilities = ProviderCapabilities(
                     supportsStructuredOutput = true,
@@ -98,7 +98,7 @@ class PreferenceManager(context: Context) {
                 id = "deepseek",
                 name = "DeepSeek",
                 baseUrl = "https://api.deepseek.com/v1",
-                models = listOf("DeepSeekv4flash"),
+                models = emptyList(),
                 type = "openai",
                 capabilities = ProviderCapabilities(
                     supportsModelList = true,
@@ -192,8 +192,12 @@ class PreferenceManager(context: Context) {
     }
 
     fun getPinyinModelName(): String {
-        val stored = plainPrefs.getString(KEY_PINYIN_MODEL_NAME, "gpt5.4flash") ?: "gpt5.4flash"
-        return if (stored in LEGACY_DEFAULT_MODELS) "gpt5.4flash" else stored
+        val stored = plainPrefs.getString(KEY_PINYIN_MODEL_NAME, null)?.trim().orEmpty()
+        return if (stored.isBlank() || stored in LEGACY_DEFAULT_MODELS) {
+            defaultModelForProvider(getPinyinProviderId())
+        } else {
+            stored
+        }
     }
 
     fun setPinyinModelName(name: String) {
@@ -210,8 +214,12 @@ class PreferenceManager(context: Context) {
     }
 
     fun getContextModelName(): String {
-        val stored = plainPrefs.getString(KEY_CONTEXT_MODEL_NAME, "gpt5.4flash") ?: "gpt5.4flash"
-        return if (stored in LEGACY_DEFAULT_MODELS) "gpt5.4flash" else stored
+        val stored = plainPrefs.getString(KEY_CONTEXT_MODEL_NAME, null)?.trim().orEmpty()
+        return if (stored.isBlank() || stored in LEGACY_DEFAULT_MODELS) {
+            defaultModelForProvider(getContextProviderId())
+        } else {
+            stored
+        }
     }
 
     fun setContextModelName(name: String) {
@@ -268,7 +276,14 @@ class PreferenceManager(context: Context) {
         plainPrefs.edit().putBoolean(KEY_PINYIN_LLM_ENABLED, enabled).apply()
     }
 
+    private fun defaultModelForProvider(providerId: String): String {
+        return getProvider(providerId)?.models?.firstOrNull().orEmpty()
+    }
+
     private val LEGACY_DEFAULT_MODELS = setOf(
+        "gpt5.4flash",
+        "claude4.5-haiku",
+        "DeepSeekv4flash",
         "gpt-4o-mini",
         "gpt-4o",
         "gpt-3.5-turbo",

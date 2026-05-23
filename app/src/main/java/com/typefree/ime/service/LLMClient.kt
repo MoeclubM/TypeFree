@@ -56,12 +56,20 @@ class LLMClient {
      * Translates a given pinyin input into Chinese characters based on surrounding context.
      */
     suspend fun translatePinyin(provider: ProviderConfig, modelName: String, pinyin: String, context: String): List<String> {
-        if (requiresApiKey(provider)) {
+        if (modelName.isBlank() || requiresApiKey(provider)) {
             return emptyList()
         }
 
-        val systemPrompt = "You are an AI input method. Translate Chinese Pinyin into Chinese candidates based on context. Return only structured JSON matching {\"candidates\":[\"测试\",\"城市\",\"车市\"]}."
-        val userPrompt = "Context: \"$context\"\nPinyin: \"$pinyin\""
+        val systemPrompt = """
+            You are the AI candidate generator for a Simplified Chinese pinyin IME.
+            Convert the current pinyin pronunciation into short Chinese word or phrase candidates.
+            Use the context only to rank candidates; do not predict unrelated next text.
+            Return only a JSON object with a candidates string array and no extra text.
+        """.trimIndent()
+        val userPrompt = """
+            Text before cursor: "$context"
+            Current pinyin: "$pinyin"
+        """.trimIndent()
 
         val rawResponse = try {
             when (provider.type) {
@@ -82,12 +90,19 @@ class LLMClient {
      * Predicts the next words or phrases based on the context.
      */
     suspend fun predictNextWords(provider: ProviderConfig, modelName: String, context: String): List<String> {
-        if (requiresApiKey(provider)) {
+        if (modelName.isBlank() || requiresApiKey(provider)) {
             return emptyList()
         }
 
-        val systemPrompt = "You are an AI input method. Based on typing history, predict the next likely Chinese words or completions. Return only structured JSON matching {\"candidates\":[\"你好\",\"去吃饭\",\"玩游戏\"]}. Limit to 3-5 completions."
-        val userPrompt = "Context: \"$context\""
+        val systemPrompt = """
+            You are the AI context suggestion generator for a Simplified Chinese IME.
+            Given the text before the cursor, predict short likely continuations.
+            Return only text that should be inserted after the existing context.
+            Do not repeat the existing context. Return only a JSON object with a candidates string array and no extra text.
+        """.trimIndent()
+        val userPrompt = """
+            Text before cursor: "$context"
+        """.trimIndent()
 
         val rawResponse = try {
             when (provider.type) {
