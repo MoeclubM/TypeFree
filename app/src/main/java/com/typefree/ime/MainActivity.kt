@@ -4,326 +4,288 @@ import android.Manifest
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.graphics.Typeface
 import android.os.Bundle
 import android.provider.Settings
+import android.text.InputType
+import android.view.Gravity
+import android.view.View
 import android.view.inputmethod.InputMethodManager
+import android.widget.Button
+import android.widget.EditText
+import android.widget.LinearLayout
+import android.widget.ScrollView
+import android.widget.TextView
 import android.widget.Toast
 import androidx.activity.ComponentActivity
-import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.compose.foundation.background
-import androidx.compose.foundation.isSystemInDarkTheme
-import androidx.compose.foundation.layout.*
-import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.foundation.verticalScroll
-import androidx.compose.material3.*
-import androidx.compose.runtime.*
-import androidx.compose.ui.Alignment
-import androidx.compose.ui.Modifier
-import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.style.TextAlign
-import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
-import androidx.lifecycle.Lifecycle
-import androidx.lifecycle.LifecycleEventObserver
-import androidx.lifecycle.compose.LocalLifecycleOwner
-import com.typefree.ime.ui.theme.TypeFreeTheme
 
 class MainActivity : ComponentActivity() {
+    private lateinit var enableStep: StepViews
+    private lateinit var selectStep: StepViews
+    private lateinit var micStep: StepViews
+    private lateinit var testSection: LinearLayout
+    private lateinit var testInput: EditText
 
-    // Permission request launcher
     private val requestAudioLauncher = registerForActivityResult(
         ActivityResultContracts.RequestPermission()
     ) { isGranted ->
         if (isGranted) {
-            Toast.makeText(this, "麦克风权限已授予！", Toast.LENGTH_SHORT).show()
+            Toast.makeText(this, "麦克风权限已授予", Toast.LENGTH_SHORT).show()
         } else {
-            Toast.makeText(this, "麦克风权限已被拒绝，语音输入将不可用。", Toast.LENGTH_LONG).show()
+            Toast.makeText(this, "麦克风权限被拒绝，语音输入不可用", Toast.LENGTH_LONG).show()
         }
+        refreshStatus()
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        setContentView(createContentView())
+    }
 
-        setContent {
-            TypeFreeTheme(darkTheme = isSystemInDarkTheme()) {
-                // States for IME active checking
-                var isImeEnabled by remember { mutableStateOf(false) }
-                var isImeSelected by remember { mutableStateOf(false) }
-                var hasMicPermission by remember { mutableStateOf(false) }
+    override fun onResume() {
+        super.onResume()
+        refreshStatus()
+    }
 
-                // Periodic checks when activity starts/resumes
-                val lifecycleOwner = LocalLifecycleOwner.current
-                DisposableEffect(lifecycleOwner) {
-                    val observer = LifecycleEventObserver { _, event ->
-                        if (event == Lifecycle.Event.ON_RESUME) {
-                            checkStatus { enabled, selected, mic ->
-                                isImeEnabled = enabled
-                                isImeSelected = selected
-                                hasMicPermission = mic
-                            }
-                        }
-                    }
-                    lifecycleOwner.lifecycle.addObserver(observer)
-                    onDispose {
-                        lifecycleOwner.lifecycle.removeObserver(observer)
-                    }
-                }
+    private fun createContentView(): View {
+        val scrollView = ScrollView(this).apply {
+            isFillViewport = true
+        }
 
-                Surface(
-                    modifier = Modifier.fillMaxSize(),
-                    color = MaterialTheme.colorScheme.background
-                ) {
-                    Column(
-                        modifier = Modifier
-                            .fillMaxSize()
-                            .padding(24.dp)
-                            .verticalScroll(rememberScrollState()),
-                        horizontalAlignment = Alignment.CenterHorizontally,
-                        verticalArrangement = Arrangement.spacedBy(20.dp)
-                    ) {
-                        Spacer(modifier = Modifier.height(20.dp))
+        val content = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(24), dp(28), dp(24), dp(28))
+        }
+        scrollView.addView(content)
 
-                        // App Title Section
-                        Text(
-                            text = "TypeFree",
-                            fontSize = 38.sp,
-                            fontWeight = FontWeight.ExtraBold,
-                            color = MaterialTheme.colorScheme.primary,
-                            textAlign = TextAlign.Center
-                        )
+        content.addView(titleText("TypeFree", 34f, Typeface.BOLD))
+        content.addView(subtitleText("AI 智能拼音与语音输入法"))
+        content.addView(bodyText("按顺序完成下面的系统设置，然后在测试框里唤起键盘。").apply {
+            setPadding(0, dp(8), 0, dp(12))
+            gravity = Gravity.CENTER
+        })
 
-                        Text(
-                            text = "AI 智能拼音与语音输入法",
-                            fontSize = 16.sp,
-                            color = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.7f),
-                            textAlign = TextAlign.Center,
-                            modifier = Modifier.padding(bottom = 12.dp)
-                        )
+        enableStep = createStepRow(
+            number = "1",
+            title = "启用键盘",
+            description = "在系统输入法列表中打开 TypeFree",
+            actionText = "去启用"
+        ) {
+            startActivity(Intent(Settings.ACTION_INPUT_METHOD_SETTINGS))
+        }
+        content.addView(enableStep.root)
 
-                        Text(
-                            text = "为了开始使用 TypeFree 输入法，请完成以下激活步骤：",
-                            fontSize = 14.sp,
-                            color = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.6f),
-                            textAlign = TextAlign.Center,
-                            modifier = Modifier.fillMaxWidth()
-                        )
+        selectStep = createStepRow(
+            number = "2",
+            title = "切换输入法",
+            description = "把 TypeFree 设为当前键盘",
+            actionText = "去切换"
+        ) {
+            val imm = getSystemService(Context.INPUT_METHOD_SERVICE) as InputMethodManager
+            imm.showInputMethodPicker()
+        }
+        content.addView(selectStep.root)
 
-                        // Step Cards
-                        StepRow(
-                            stepNumber = "1",
-                            title = "在系统设置中启用键盘",
-                            description = "添加 TypeFree 到您的可用输入法列表中",
-                            statusText = if (isImeEnabled) "✓ 已启用" else "去启用",
-                            isCompleted = isImeEnabled,
-                            onClick = {
-                                startActivity(Intent(Settings.ACTION_INPUT_METHOD_SETTINGS))
-                            }
-                        )
+        micStep = createStepRow(
+            number = "3",
+            title = "麦克风权限",
+            description = "仅语音输入需要，可稍后再授权",
+            actionText = "去授权"
+        ) {
+            requestAudioLauncher.launch(Manifest.permission.RECORD_AUDIO)
+        }
+        content.addView(micStep.root)
 
-                        StepRow(
-                            stepNumber = "2",
-                            title = "切换默认输入法",
-                            description = "将 TypeFree 设置为当前活动输入法",
-                            statusText = if (isImeSelected) "✓ 已设为默认" else "去切换",
-                            isCompleted = isImeSelected,
-                            enabled = isImeEnabled,
-                            onClick = {
-                                val imm = getSystemService(Context.INPUT_METHOD_SERVICE) as InputMethodManager
-                                imm.showInputMethodPicker()
-                            }
-                        )
-
-                        StepRow(
-                            stepNumber = "3",
-                            title = "麦克风权限 (可选)",
-                            description = "使用语音转文字功能时需要此权限",
-                            statusText = if (hasMicPermission) "✓ 已授权" else "去授权",
-                            isCompleted = hasMicPermission,
-                            onClick = {
-                                requestAudioLauncher.launch(Manifest.permission.RECORD_AUDIO)
-                            }
-                        )
-
-                        Spacer(modifier = Modifier.height(10.dp))
-
-                        // Action area once active
-                        if (isImeSelected) {
-                            Card(
-                                colors = CardDefaults.cardColors(
-                                    containerColor = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.3f)
-                                ),
-                                shape = RoundedCornerShape(12.dp),
-                                modifier = Modifier.fillMaxWidth()
-                            ) {
-                                Column(
-                                    modifier = Modifier.padding(16.dp),
-                                    verticalArrangement = Arrangement.spacedBy(10.dp)
-                                ) {
-                                    Text(
-                                        text = "测试输入法：",
-                                        fontWeight = FontWeight.Bold,
-                                        fontSize = 14.sp,
-                                        color = MaterialTheme.colorScheme.primary
-                                    )
-
-                                    var testText by remember { mutableStateOf("") }
-                                    OutlinedTextField(
-                                        value = testText,
-                                        onValueChange = { testText = it },
-                                        placeholder = { Text("点击这里测试键盘是否正常弹出") },
-                                        modifier = Modifier.fillMaxWidth(),
-                                        shape = RoundedCornerShape(8.dp)
-                                    )
-                                }
-                            }
-                        }
-
-                        Button(
-                            onClick = {
-                                startActivity(Intent(this@MainActivity, SettingsActivity::class.java))
-                            },
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .height(56.dp),
-                            shape = RoundedCornerShape(14.dp),
-                            colors = ButtonDefaults.buttonColors(
-                                containerColor = if (isImeSelected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.secondary
-                            )
-                        ) {
-                            Text(
-                                text = "打开输入法高级设置",
-                                fontSize = 16.sp,
-                                fontWeight = FontWeight.Bold
-                            )
-                        }
-
-                        Spacer(modifier = Modifier.height(20.dp))
-                    }
+        testSection = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(0, dp(18), 0, dp(8))
+            visibility = View.GONE
+        }
+        testSection.addView(sectionTitle("测试键盘"))
+        testInput = EditText(this).apply {
+            hint = "点这里测试 TypeFree 键盘"
+            minLines = 3
+            gravity = Gravity.TOP or Gravity.START
+            inputType = InputType.TYPE_CLASS_TEXT or
+                InputType.TYPE_TEXT_FLAG_MULTI_LINE or
+                InputType.TYPE_TEXT_FLAG_CAP_SENTENCES
+            setSingleLine(false)
+            setPadding(dp(12), dp(10), dp(12), dp(10))
+            setOnFocusChangeListener { view, hasFocus ->
+                if (hasFocus) {
+                    val imm = getSystemService(Context.INPUT_METHOD_SERVICE) as InputMethodManager
+                    imm.showSoftInput(view, InputMethodManager.SHOW_IMPLICIT)
                 }
             }
+            setOnClickListener {
+                val imm = getSystemService(Context.INPUT_METHOD_SERVICE) as InputMethodManager
+                imm.showSoftInput(this, InputMethodManager.SHOW_IMPLICIT)
+            }
+        }
+        testSection.addView(
+            testInput,
+            LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                dp(112)
+            )
+        )
+        content.addView(testSection)
+
+        val settingsButton = Button(this).apply {
+            text = "高级设置"
+            setOnClickListener {
+                startActivity(Intent(this@MainActivity, SettingsActivity::class.java))
+            }
+        }
+        content.addView(
+            settingsButton,
+            LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                dp(52)
+            ).apply {
+                topMargin = dp(12)
+            }
+        )
+
+        return scrollView
+    }
+
+    private fun createStepRow(
+        number: String,
+        title: String,
+        description: String,
+        actionText: String,
+        onClick: () -> Unit
+    ): StepViews {
+        val root = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(0, dp(12), 0, dp(12))
+            minimumHeight = dp(78)
+        }
+
+        val numberView = TextView(this).apply {
+            text = number
+            textSize = 18f
+            typeface = Typeface.DEFAULT_BOLD
+            gravity = Gravity.CENTER
+        }
+        root.addView(numberView, LinearLayout.LayoutParams(dp(40), dp(40)))
+
+        val textColumn = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(12), 0, dp(12), 0)
+        }
+        val titleView = TextView(this).apply {
+            text = title
+            textSize = 16f
+            typeface = Typeface.DEFAULT_BOLD
+        }
+        val descriptionView = TextView(this).apply {
+            text = description
+            textSize = 13f
+            alpha = 0.72f
+            setPadding(0, dp(3), 0, 0)
+        }
+        textColumn.addView(titleView)
+        textColumn.addView(descriptionView)
+        root.addView(textColumn, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+
+        val actionButton = Button(this).apply {
+            text = actionText
+            setOnClickListener { onClick() }
+        }
+        root.addView(actionButton, LinearLayout.LayoutParams(dp(96), dp(44)))
+
+        return StepViews(root, titleView, descriptionView, actionButton)
+    }
+
+    private fun refreshStatus() {
+        checkStatus { enabled, selected, mic ->
+            updateStep(enableStep, enabled, "已启用", "去启用", true)
+            updateStep(selectStep, selected, "已切换", "去切换", enabled)
+            updateStep(micStep, mic, "已授权", "去授权", true)
+            testSection.visibility = if (selected) View.VISIBLE else View.GONE
         }
     }
 
-    // Lifecycle-based state updates are handled by LocalLifecycleOwner in Compose
+    private fun updateStep(
+        step: StepViews,
+        completed: Boolean,
+        doneText: String,
+        actionText: String,
+        enabled: Boolean
+    ) {
+        step.actionButton.text = if (completed) doneText else actionText
+        step.actionButton.isEnabled = enabled && !completed
+        step.titleView.alpha = if (enabled) 1f else 0.45f
+        step.descriptionView.alpha = if (enabled) 0.72f else 0.36f
+    }
 
     private fun checkStatus(onChecked: (enabled: Boolean, selected: Boolean, mic: Boolean) -> Unit) {
         val imm = getSystemService(Context.INPUT_METHOD_SERVICE) as InputMethodManager
         val enabledMethods = imm.enabledInputMethodList
-        val packageName = packageName
-
         val enabled = enabledMethods.any { it.packageName == packageName }
-        
+
         val defaultIme = Settings.Secure.getString(contentResolver, Settings.Secure.DEFAULT_INPUT_METHOD)
-        val selected = defaultIme != null && defaultIme.contains(packageName)
+        val selected = defaultIme?.contains(packageName) == true
 
         val mic = ContextCompat.checkSelfPermission(
-            this, Manifest.permission.RECORD_AUDIO
+            this,
+            Manifest.permission.RECORD_AUDIO
         ) == PackageManager.PERMISSION_GRANTED
 
         onChecked(enabled, selected, mic)
     }
-}
 
-@Composable
-fun StepRow(
-    stepNumber: String,
-    title: String,
-    description: String,
-    statusText: String,
-    isCompleted: Boolean,
-    enabled: Boolean = true,
-    onClick: () -> Unit
-) {
-    ElevatedCard(
-        onClick = { if (enabled) onClick() },
-        enabled = enabled,
-        shape = RoundedCornerShape(16.dp),
-        modifier = Modifier.fillMaxWidth()
-    ) {
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(16.dp),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            // Step Number circle
-            Box(
-                modifier = Modifier
-                    .size(36.dp)
-                    .background(
-                        color = if (isCompleted) {
-                            MaterialTheme.colorScheme.primary
-                        } else if (!enabled) {
-                            MaterialTheme.colorScheme.onSurface.copy(alpha = 0.12f)
-                        } else {
-                            MaterialTheme.colorScheme.secondaryContainer
-                        },
-                        shape = RoundedCornerShape(18.dp)
-                    ),
-                contentAlignment = Alignment.Center
-            ) {
-                Text(
-                    text = stepNumber,
-                    color = if (isCompleted) {
-                        MaterialTheme.colorScheme.onPrimary
-                    } else {
-                        MaterialTheme.colorScheme.onSecondaryContainer
-                    },
-                    fontWeight = FontWeight.Bold,
-                    fontSize = 16.sp
-                )
-            }
-
-            Spacer(modifier = Modifier.width(16.dp))
-
-            // Text Info
-            Column(
-                modifier = Modifier.weight(1f)
-            ) {
-                Text(
-                    text = title,
-                    fontWeight = FontWeight.Bold,
-                    fontSize = 15.sp,
-                    color = if (enabled) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.38f)
-                )
-                Text(
-                    text = description,
-                    fontSize = 12.sp,
-                    color = if (enabled) MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f) else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.3f)
-                )
-            }
-
-            Spacer(modifier = Modifier.width(8.dp))
-
-            // Status Badge
-            Surface(
-                color = if (isCompleted) {
-                    MaterialTheme.colorScheme.primaryContainer
-                } else if (!enabled) {
-                    MaterialTheme.colorScheme.surfaceVariant
-                } else {
-                    MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.5f)
-                },
-                shape = RoundedCornerShape(8.dp),
-                modifier = Modifier.padding(start = 4.dp)
-            ) {
-                Text(
-                    text = statusText,
-                    fontSize = 12.sp,
-                    fontWeight = FontWeight.Bold,
-                    color = if (isCompleted) {
-                        MaterialTheme.colorScheme.onPrimaryContainer
-                    } else if (!enabled) {
-                        MaterialTheme.colorScheme.onSurface.copy(alpha = 0.38f)
-                    } else {
-                        MaterialTheme.colorScheme.onErrorContainer
-                    },
-                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 6.dp)
-                )
-            }
+    private fun titleText(text: String, size: Float, style: Int): TextView {
+        return TextView(this).apply {
+            this.text = text
+            textSize = size
+            typeface = Typeface.DEFAULT_BOLD
+            gravity = Gravity.CENTER
+            setTypeface(typeface, style)
         }
     }
+
+    private fun subtitleText(text: String): TextView {
+        return TextView(this).apply {
+            this.text = text
+            textSize = 16f
+            gravity = Gravity.CENTER
+            alpha = 0.78f
+            setPadding(0, dp(4), 0, dp(4))
+        }
+    }
+
+    private fun bodyText(text: String): TextView {
+        return TextView(this).apply {
+            this.text = text
+            textSize = 14f
+            alpha = 0.72f
+            setLineSpacing(dp(2).toFloat(), 1f)
+        }
+    }
+
+    private fun sectionTitle(text: String): TextView {
+        return TextView(this).apply {
+            this.text = text
+            textSize = 17f
+            typeface = Typeface.DEFAULT_BOLD
+            setPadding(0, 0, 0, dp(8))
+        }
+    }
+
+    private fun dp(value: Int): Int {
+        return (value * resources.displayMetrics.density + 0.5f).toInt()
+    }
+
+    private data class StepViews(
+        val root: LinearLayout,
+        val titleView: TextView,
+        val descriptionView: TextView,
+        val actionButton: Button
+    )
 }

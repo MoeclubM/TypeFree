@@ -127,18 +127,55 @@ class LLMClient {
 
     private suspend fun callOpenAiChat(provider: ProviderConfig, modelName: String, systemPrompt: String, userPrompt: String): String? = withContext(Dispatchers.IO) {
         val url = if (provider.baseUrl.endsWith("/chat/completions")) provider.baseUrl else "${provider.baseUrl.trimEnd('/')}/chat/completions"
-        val requestBodyJson = buildJsonObject {
+        val primaryBody = openAiChatRequestBody(
+            modelName = modelName,
+            systemPrompt = systemPrompt,
+            userPrompt = userPrompt,
+            responseFormat = openAiChatJsonSchemaFormat(),
+            thinkingBudget = provider.thinkingBudget
+        )
+        val primaryResult = executeOpenAiChat(provider, url, primaryBody)
+        if (primaryResult.success || primaryResult.text != null) {
+            return@withContext primaryResult.text
+        }
+
+        val fallbackBody = openAiChatRequestBody(
+            modelName = modelName,
+            systemPrompt = systemPrompt,
+            userPrompt = userPrompt,
+            responseFormat = openAiChatJsonObjectFormat(),
+            thinkingBudget = 0
+        )
+        executeOpenAiChat(provider, url, fallbackBody).text
+    }
+
+    private data class LlmTextResult(
+        val success: Boolean,
+        val text: String?
+    )
+
+    private fun openAiChatRequestBody(
+        modelName: String,
+        systemPrompt: String,
+        userPrompt: String,
+        responseFormat: JsonObject,
+        thinkingBudget: Int
+    ): String {
+        return buildJsonObject {
             put("model", modelName)
             putJsonArray("messages") {
                 addMessage("system", systemPrompt)
                 addMessage("user", userPrompt)
             }
             put("temperature", 0.3)
-            put("response_format", openAiChatJsonSchemaFormat())
-            provider.thinkingBudget.takeIf { it > 0 }?.let {
+            put("response_format", responseFormat)
+            thinkingBudget.takeIf { it > 0 }?.let {
                 put("reasoning_effort", thinkingEffort(it))
             }
         }.toString()
+    }
+
+    private fun executeOpenAiChat(provider: ProviderConfig, url: String, requestBodyJson: String): LlmTextResult {
         val body = requestBodyJson.toRequestBody(jsonMediaType)
 
         val requestBuilder = Request.Builder()
@@ -151,12 +188,12 @@ class LLMClient {
         }
 
         val request = requestBuilder.build()
-        client.newCall(request).execute().use { response ->
+        return client.newCall(request).execute().use { response ->
             if (!response.isSuccessful) {
                 Log.e("LLMClient", "OpenAI call failed: ${response.code} ${response.message}")
-                return@withContext null
+                return LlmTextResult(false, null)
             }
-            val responseBody = response.body?.string() ?: return@withContext null
+            val responseBody = response.body?.string() ?: return LlmTextResult(true, null)
             
             // Extract the content from chat response JSON
             try {
@@ -164,10 +201,10 @@ class LLMClient {
                 val choices = element.jsonObject["choices"]?.jsonArray
                 val firstChoice = choices?.getOrNull(0)?.jsonObject
                 val message = firstChoice?.get("message")?.jsonObject
-                message?.get("content")?.jsonPrimitive?.content
+                LlmTextResult(true, message?.get("content")?.jsonPrimitive?.content)
             } catch (e: Exception) {
                 Log.e("LLMClient", "Failed to parse OpenAI response body", e)
-                null
+                LlmTextResult(true, null)
             }
         }
     }
@@ -367,6 +404,12 @@ class LLMClient {
                 put("strict", true)
                 put("schema", candidatePayloadSchema())
             }
+        }
+    }
+
+    private fun openAiChatJsonObjectFormat(): JsonObject {
+        return buildJsonObject {
+            put("type", "json_object")
         }
     }
 

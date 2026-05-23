@@ -142,23 +142,26 @@ class PreferenceManager(context: Context) {
     private fun normalizeProviders(providers: List<ProviderConfig>): List<ProviderConfig> {
         return providers.mapNotNull { provider ->
             when (provider.id) {
-                "openai" -> provider.copy(
-                    type = "openai_responses",
-                    models = listOf("gpt5.4flash"),
-                    capabilities = DEFAULT_PROVIDERS.first { it.id == "openai" }.capabilities
-                )
-                "anthropic" -> provider.copy(
-                    models = listOf("claude4.5-haiku"),
-                    capabilities = DEFAULT_PROVIDERS.first { it.id == "anthropic" }.capabilities
-                )
-                "deepseek" -> provider.copy(
-                    models = listOf("DeepSeekv4flash"),
-                    capabilities = DEFAULT_PROVIDERS.first { it.id == "deepseek" }.capabilities
-                )
+                "openai" -> normalizeBuiltInProvider(provider, DEFAULT_PROVIDERS.first { it.id == "openai" })
+                "anthropic" -> normalizeBuiltInProvider(provider, DEFAULT_PROVIDERS.first { it.id == "anthropic" })
+                "deepseek" -> normalizeBuiltInProvider(provider, DEFAULT_PROVIDERS.first { it.id == "deepseek" })
                 "ollama" -> null
                 else -> provider
             }
         }
+    }
+
+    private fun normalizeBuiltInProvider(provider: ProviderConfig, defaults: ProviderConfig): ProviderConfig {
+        val hasLegacyModels = provider.models.any { it in LEGACY_DEFAULT_MODELS }
+        val models = when {
+            provider.models.isEmpty() || hasLegacyModels -> defaults.models
+            else -> provider.models
+        }
+        return provider.copy(
+            type = if (provider.id == "openai" && provider.type == "openai") "openai_responses" else provider.type,
+            models = models,
+            capabilities = if (provider.capabilities == ProviderCapabilities()) defaults.capabilities else provider.capabilities
+        )
     }
 
     fun saveProviders(providers: List<ProviderConfig>) {
