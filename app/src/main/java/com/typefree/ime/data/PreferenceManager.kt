@@ -15,10 +15,16 @@ data class ProviderConfig(
     val name: String,
     val baseUrl: String = "",
     val apiKey: String = "",
-    val type: String = "openai", // openai, openai_responses, anthropic, gemini
+    val type: String = "openai", // openai, openai_responses, anthropic, gemini, qwen_asr, volcengine_asr
     val models: List<String> = emptyList(),
     val thinkingBudget: Int = 0,
+    val modelSettings: Map<String, ModelSettings> = emptyMap(),
     val capabilities: ProviderCapabilities = ProviderCapabilities()
+)
+
+@Serializable
+data class ModelSettings(
+    val thinkingBudget: Int = 0
 )
 
 @Serializable
@@ -113,6 +119,51 @@ class PreferenceManager(context: Context) {
                     supportsToolCalling = true,
                     supportsThinkingBudget = true
                 )
+            ),
+            ProviderConfig(
+                id = "gemini",
+                name = "Gemini",
+                baseUrl = "https://generativelanguage.googleapis.com/v1beta",
+                models = emptyList(),
+                type = "gemini",
+                capabilities = ProviderCapabilities(
+                    supportsModelList = true,
+                    supportsStructuredOutput = true,
+                    supportsToolCalling = true,
+                    supportsThinkingBudget = true
+                )
+            ),
+            ProviderConfig(
+                id = "bailian",
+                name = "阿里云百炼",
+                baseUrl = "https://dashscope.aliyuncs.com/compatible-mode/v1",
+                models = emptyList(),
+                type = "openai",
+                capabilities = ProviderCapabilities(
+                    supportsModelList = true,
+                    supportsStructuredOutput = true,
+                    supportsToolCalling = true
+                )
+            ),
+            ProviderConfig(
+                id = "bailian_qwen_asr",
+                name = "百炼 Qwen3 ASR",
+                baseUrl = "https://dashscope.aliyuncs.com/compatible-mode/v1",
+                models = listOf("qwen3-asr-flash"),
+                type = "qwen_asr",
+                capabilities = ProviderCapabilities(
+                    supportsAsr = true
+                )
+            ),
+            ProviderConfig(
+                id = "volcengine_doubao_asr",
+                name = "火山引擎豆包 ASR",
+                baseUrl = "https://openspeech.bytedance.com/api/v3/auc/bigmodel/recognize/flash",
+                models = listOf("volc.bigasr.auc_turbo"),
+                type = "volcengine_asr",
+                capabilities = ProviderCapabilities(
+                    supportsAsr = true
+                )
             )
         )
 
@@ -147,15 +198,16 @@ class PreferenceManager(context: Context) {
     }
 
     private fun normalizeProviders(providers: List<ProviderConfig>): List<ProviderConfig> {
-        return providers.mapNotNull { provider ->
+        val normalized = providers.mapNotNull { provider ->
             when (provider.id) {
-                "openai" -> normalizeBuiltInProvider(provider, DEFAULT_PROVIDERS.first { it.id == "openai" })
-                "anthropic" -> normalizeBuiltInProvider(provider, DEFAULT_PROVIDERS.first { it.id == "anthropic" })
-                "deepseek" -> normalizeBuiltInProvider(provider, DEFAULT_PROVIDERS.first { it.id == "deepseek" })
+                "openai", "anthropic", "deepseek", "gemini", "bailian", "bailian_qwen_asr", "volcengine_doubao_asr" ->
+                    normalizeBuiltInProvider(provider, DEFAULT_PROVIDERS.first { it.id == provider.id })
                 "ollama" -> null
                 else -> provider
             }
         }
+        val existingIds = normalized.mapTo(mutableSetOf()) { it.id }
+        return normalized + DEFAULT_PROVIDERS.filter { it.id !in existingIds }
     }
 
     private fun normalizeBuiltInProvider(provider: ProviderConfig, defaults: ProviderConfig): ProviderConfig {
@@ -167,6 +219,7 @@ class PreferenceManager(context: Context) {
         return provider.copy(
             type = if (provider.id == "openai" && provider.type == "openai") "openai_responses" else provider.type,
             models = models,
+            modelSettings = provider.modelSettings.filterKeys { it in models },
             capabilities = if (provider.capabilities == ProviderCapabilities()) defaults.capabilities else provider.capabilities
         )
     }

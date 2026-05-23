@@ -70,6 +70,30 @@ class LLMClientTest {
     }
 
     @Test
+    fun openAiResponsesMapsSmallBudgetForGpt5Series() {
+        val body = parseObject(client.buildOpenAiResponsesRequestBody("gpt-5.4-mini", "system", "user", 512))
+
+        assertEquals("minimal", body["reasoning"]?.jsonObject?.get("effort")?.jsonPrimitive?.content)
+    }
+
+    @Test
+    fun deepSeekChatBodyUsesThinkingObject() {
+        val body = parseObject(
+            client.buildOpenAiChatRequestBody(
+                modelName = "deepseek-v4-flash",
+                systemPrompt = "system",
+                userPrompt = "user",
+                responseFormat = json.parseToJsonElement("""{"type":"json_object"}""").jsonObject,
+                thinkingBudget = 8192,
+                providerType = "openai"
+            )
+        )
+
+        assertEquals("max", body["reasoning_effort"]?.jsonPrimitive?.content)
+        assertEquals("enabled", body["thinking"]?.jsonObject?.get("type")?.jsonPrimitive?.content)
+    }
+
+    @Test
     fun anthropicBodyForcesCandidateToolWithoutThinking() {
         val body = parseObject(client.buildAnthropicRequestBody("claude4.5-haiku", "system", "user", 0))
 
@@ -94,7 +118,7 @@ class LLMClientTest {
 
     @Test
     fun geminiBodyUsesResponseJsonSchema() {
-        val body = parseObject(client.buildGeminiRequestBody("system", "user", 512))
+        val body = parseObject(client.buildGeminiRequestBody("gemini-2.5-flash", "system", "user", 512))
 
         val generationConfig = body["generationConfig"]?.jsonObject
         assertEquals("application/json", generationConfig?.get("responseMimeType")?.jsonPrimitive?.content)
@@ -110,6 +134,15 @@ class LLMClientTest {
                 ?.content
         )
         assertEquals("512", generationConfig?.get("thinkingConfig")?.jsonObject?.get("thinkingBudget")?.jsonPrimitive?.content)
+    }
+
+    @Test
+    fun gemini3BodyUsesThinkingLevel() {
+        val body = parseObject(client.buildGeminiRequestBody("gemini-3.5-flash", "system", "user", 512))
+
+        val thinkingConfig = body["generationConfig"]?.jsonObject?.get("thinkingConfig")?.jsonObject
+        assertEquals("low", thinkingConfig?.get("thinkingLevel")?.jsonPrimitive?.content)
+        assertFalse(thinkingConfig?.containsKey("thinkingBudget") == true)
     }
 
     @Test
@@ -152,6 +185,15 @@ class LLMClientTest {
         assertTrue(openAi.supportsAsr)
         assertTrue(deepSeek.supportsThinkingBudget)
         assertFalse(deepSeek.supportsAsr)
+    }
+
+    @Test
+    fun filtersNonTextModelsFromDetectedLists() {
+        val provider = ProviderConfig(id = "openai", name = "OpenAI", type = "openai_responses")
+
+        assertTrue(client.isSupportedStructuredModel(provider, "gpt-5.4-mini"))
+        assertFalse(client.isSupportedStructuredModel(provider, "text-embedding-3-small"))
+        assertFalse(client.isSupportedStructuredModel(provider, "qwen3-asr-flash"))
     }
 
     private fun parseObject(value: String) = json.parseToJsonElement(value).jsonObject

@@ -10,6 +10,7 @@ import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonArrayBuilder
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonObjectBuilder
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.contentOrNull
@@ -57,7 +58,7 @@ class LLMClient {
      * Translates a given pinyin input into Chinese characters based on surrounding context.
      */
     suspend fun translatePinyin(provider: ProviderConfig, modelName: String, pinyin: String, context: String): List<String> {
-        if (modelName.isBlank() || requiresApiKey(provider)) {
+        if (modelName.isBlank() || requiresApiKey(provider) || !isSupportedStructuredModel(provider, modelName)) {
             return emptyList()
         }
 
@@ -95,7 +96,7 @@ class LLMClient {
      * Predicts the next words or phrases based on the context.
      */
     suspend fun predictNextWords(provider: ProviderConfig, modelName: String, context: String): List<String> {
-        if (modelName.isBlank() || requiresApiKey(provider)) {
+        if (modelName.isBlank() || requiresApiKey(provider) || !isSupportedStructuredModel(provider, modelName)) {
             return emptyList()
         }
 
@@ -134,7 +135,13 @@ class LLMClient {
         selectedText: String,
         context: String
     ): List<UserPinyinEntry> {
-        if (modelName.isBlank() || requiresApiKey(provider) || sourcePinyin.isBlank() || selectedText.isBlank()) {
+        if (
+            modelName.isBlank() ||
+            requiresApiKey(provider) ||
+            !isSupportedStructuredModel(provider, modelName) ||
+            sourcePinyin.isBlank() ||
+            selectedText.isBlank()
+        ) {
             return emptyList()
         }
 
@@ -173,8 +180,18 @@ class LLMClient {
         try {
             when (provider.type) {
                 "gemini" -> detectGemini(provider)
+                "qwen_asr" -> ProviderDetectionResult(
+                    models = provider.models.ifEmpty { listOf("qwen3-asr-flash") },
+                    capabilities = ProviderCapabilities(supportsAsr = true),
+                    message = "Qwen ASR uses Bailian OpenAI-compatible chat/completions."
+                )
+                "volcengine_asr" -> ProviderDetectionResult(
+                    models = provider.models.ifEmpty { listOf("volc.bigasr.auc_turbo") },
+                    capabilities = ProviderCapabilities(supportsAsr = true),
+                    message = "Doubao ASR uses Volcengine bigmodel recording recognition."
+                )
                 "anthropic" -> ProviderDetectionResult(
-                    models = provider.models,
+                    models = provider.models.filter { isSupportedStructuredModel(provider, it) },
                     capabilities = provider.capabilities.copy(
                         supportsStructuredOutput = true,
                         supportsToolCalling = true,
@@ -192,12 +209,14 @@ class LLMClient {
 
     private suspend fun callOpenAiChat(provider: ProviderConfig, modelName: String, systemPrompt: String, userPrompt: String): String? = withContext(Dispatchers.IO) {
         val url = if (provider.baseUrl.endsWith("/chat/completions")) provider.baseUrl else "${provider.baseUrl.trimEnd('/')}/chat/completions"
+        val thinkingBudget = thinkingBudgetFor(provider, modelName)
         val primaryBody = buildOpenAiChatRequestBody(
             modelName = modelName,
             systemPrompt = systemPrompt,
             userPrompt = userPrompt,
-            responseFormat = openAiChatJsonSchemaFormat(),
-            thinkingBudget = provider.thinkingBudget
+            responseFormat = openAiChatPrimaryResponseFormat(provider, modelName),
+            thinkingBudget = thinkingBudget,
+            providerType = provider.type
         )
         val primaryResult = executeOpenAiChat(provider, url, primaryBody)
         if (primaryResult.text != null) {
@@ -209,7 +228,8 @@ class LLMClient {
             systemPrompt = systemPrompt,
             userPrompt = userPrompt,
             responseFormat = openAiChatJsonObjectFormat(),
-            thinkingBudget = 0
+            thinkingBudget = 0,
+            providerType = provider.type
         )
         executeOpenAiChat(provider, url, fallbackBody).text
     }
@@ -224,7 +244,8 @@ class LLMClient {
         systemPrompt: String,
         userPrompt: String,
         responseFormat: JsonObject,
-        thinkingBudget: Int
+        thinkingBudget: Int,
+        providerType: String = "openai"
     ): String {
         return buildJsonObject {
             put("model", modelName)
@@ -234,10 +255,20 @@ class LLMClient {
             }
             put("temperature", 0.3)
             put("response_format", responseFormat)
-            thinkingBudget.takeIf { it > 0 }?.let {
-                put("reasoning_effort", thinkingEffort(it))
-            }
+            putOpenAiChatThinking(modelName, providerType, thinkingBudget)
         }.toString()
+    }
+
+    private fun JsonObjectBuilder.putOpenAiChatThinking(modelName: String, providerType: String, thinkingBudget: Int) {
+        if (thinkingBudget <= 0) return
+        if (isDeepSeekModel(modelName) || providerType == "deepseek") {
+            put("reasoning_effort", deepSeekReasoningEffort(thinkingBudget))
+            putJsonObject("thinking") {
+                put("type", "enabled")
+            }
+        } else if (isOpenAiReasoningModel(modelName)) {
+            put("reasoning_effort", openAiReasoningEffort(modelName, thinkingBudget))
+        }
     }
 
     private fun executeOpenAiChat(provider: ProviderConfig, url: String, requestBodyJson: String): LlmTextResult {
@@ -276,7 +307,7 @@ class LLMClient {
 
     private suspend fun callOpenAiResponses(provider: ProviderConfig, modelName: String, systemPrompt: String, userPrompt: String): String? = withContext(Dispatchers.IO) {
         val url = if (provider.baseUrl.endsWith("/responses")) provider.baseUrl else "${provider.baseUrl.trimEnd('/')}/responses"
-        val requestBodyJson = buildOpenAiResponsesRequestBody(modelName, systemPrompt, userPrompt, provider.thinkingBudget)
+        val requestBodyJson = buildOpenAiResponsesRequestBody(modelName, systemPrompt, userPrompt, thinkingBudgetFor(provider, modelName))
 
         val request = authorizedPostRequest(provider, url, requestBodyJson)
         client.newCall(request).execute().use { response ->
@@ -308,9 +339,10 @@ class LLMClient {
             putJsonObject("text") {
                 put("format", openAiResponsesJsonSchemaFormat())
             }
-            thinkingBudget.takeIf { it > 0 }?.let {
+            val effort = openAiResponsesReasoningEffort(modelName, thinkingBudget)
+            if (effort != null) {
                 putJsonObject("reasoning") {
-                    put("effort", thinkingEffort(it))
+                    put("effort", effort)
                 }
             }
         }.toString()
@@ -318,7 +350,7 @@ class LLMClient {
 
     private suspend fun callAnthropic(provider: ProviderConfig, modelName: String, systemPrompt: String, userPrompt: String): String? = withContext(Dispatchers.IO) {
         val url = if (provider.baseUrl.endsWith("/messages")) provider.baseUrl else "${provider.baseUrl.trimEnd('/')}/messages"
-        val requestBodyJson = buildAnthropicRequestBody(modelName, systemPrompt, userPrompt, provider.thinkingBudget)
+        val requestBodyJson = buildAnthropicRequestBody(modelName, systemPrompt, userPrompt, thinkingBudgetFor(provider, modelName))
         val body = requestBodyJson.toRequestBody(jsonMediaType)
 
         val request = Request.Builder()
@@ -398,7 +430,7 @@ class LLMClient {
     private suspend fun callGemini(provider: ProviderConfig, modelName: String, systemPrompt: String, userPrompt: String): String? = withContext(Dispatchers.IO) {
         val base = provider.baseUrl.trimEnd('/').ifBlank { "https://generativelanguage.googleapis.com/v1beta" }
         val url = if (base.endsWith(":generateContent")) base else "$base/models/$modelName:generateContent"
-        val requestBodyJson = buildGeminiRequestBody(systemPrompt, userPrompt, provider.thinkingBudget)
+        val requestBodyJson = buildGeminiRequestBody(modelName, systemPrompt, userPrompt, thinkingBudgetFor(provider, modelName))
 
         val requestBuilder = Request.Builder()
             .url(url)
@@ -437,6 +469,7 @@ class LLMClient {
     }
 
     internal fun buildGeminiRequestBody(
+        modelName: String,
         systemPrompt: String,
         userPrompt: String,
         thinkingBudget: Int
@@ -461,9 +494,13 @@ class LLMClient {
                 put("temperature", 0.3)
                 put("responseMimeType", "application/json")
                 put("responseJsonSchema", geminiCandidateJsonSchema())
-                thinkingBudget.takeIf { it > 0 }?.let {
+                if (isGeminiThinkingLevelModel(modelName) && thinkingBudget > 0) {
                     putJsonObject("thinkingConfig") {
-                        put("thinkingBudget", it)
+                        put("thinkingLevel", geminiThinkingLevel(thinkingBudget))
+                    }
+                } else if (thinkingBudget > 0) {
+                    putJsonObject("thinkingConfig") {
+                        put("thinkingBudget", thinkingBudget)
                     }
                 }
             }
@@ -506,6 +543,14 @@ class LLMClient {
     private fun openAiChatJsonObjectFormat(): JsonObject {
         return buildJsonObject {
             put("type", "json_object")
+        }
+    }
+
+    private fun openAiChatPrimaryResponseFormat(provider: ProviderConfig, modelName: String): JsonObject {
+        return if (isDeepSeekModel(modelName) || provider.name.contains("DeepSeek", ignoreCase = true)) {
+            openAiChatJsonObjectFormat()
+        } else {
+            openAiChatJsonSchemaFormat()
         }
     }
 
@@ -563,6 +608,65 @@ class LLMClient {
         }
     }
 
+    private fun thinkingBudgetFor(provider: ProviderConfig, modelName: String): Int {
+        return provider.modelSettings[modelName]?.thinkingBudget ?: provider.thinkingBudget
+    }
+
+    private fun openAiResponsesReasoningEffort(modelName: String, budget: Int): String? {
+        if (!isOpenAiReasoningModel(modelName)) return null
+        if (budget <= 0) {
+            return if (normalizedModel(modelName).contains("gpt51") || normalizedModel(modelName).contains("gpt-51")) {
+                "none"
+            } else {
+                null
+            }
+        }
+        return openAiReasoningEffort(modelName, budget)
+    }
+
+    private fun openAiReasoningEffort(modelName: String, budget: Int): String {
+        val normalized = normalizedModel(modelName)
+        return when {
+            budget <= 512 &&
+                (normalized.startsWith("gpt5") || normalized.startsWith("gpt-5")) &&
+                !normalized.startsWith("gpt51") &&
+                !normalized.startsWith("gpt-51") -> "minimal"
+            budget <= 1024 -> "low"
+            budget <= 4096 -> "medium"
+            else -> "high"
+        }
+    }
+
+    private fun deepSeekReasoningEffort(budget: Int): String {
+        return if (budget <= 4096) "high" else "max"
+    }
+
+    private fun geminiThinkingLevel(budget: Int): String {
+        return if (budget <= 2048) "low" else "high"
+    }
+
+    private fun isGeminiThinkingLevelModel(modelName: String): Boolean {
+        val normalized = normalizedModel(modelName)
+        return normalized.startsWith("gemini3") || normalized.startsWith("gemini-3")
+    }
+
+    private fun isOpenAiReasoningModel(modelName: String): Boolean {
+        val normalized = normalizedModel(modelName)
+        return normalized.startsWith("gpt5") ||
+            normalized.startsWith("gpt-5") ||
+            normalized.startsWith("o1") ||
+            normalized.startsWith("o3") ||
+            normalized.startsWith("o4")
+    }
+
+    private fun isDeepSeekModel(modelName: String): Boolean {
+        return normalizedModel(modelName).contains("deepseek")
+    }
+
+    private fun normalizedModel(modelName: String): String {
+        return modelName.lowercase(Locale.US).replace(".", "").replace("_", "-")
+    }
+
     private fun thinkingEffort(budget: Int): String {
         return when {
             budget <= 1024 -> "low"
@@ -603,9 +707,14 @@ class LLMClient {
                 return ProviderDetectionResult(provider.models, provider.capabilities, "Model detection failed: HTTP ${response.code}")
             }
             val body = response.body?.string().orEmpty()
-            val models = parseOpenAiModelsResponse(body)
+            val parsedModels = parseOpenAiModelsResponse(body)
+            val models = parsedModels.filter { isSupportedStructuredModel(provider, it) }
             val capabilities = openAiCompatibleCapabilities(provider)
-            return ProviderDetectionResult(models.ifEmpty { provider.models }, capabilities, "Detected ${models.size} model(s).")
+            return ProviderDetectionResult(
+                models = models,
+                capabilities = capabilities,
+                message = "Detected ${parsedModels.size} model(s), ${models.size} support native tools or structured output."
+            )
         }
     }
 
@@ -633,6 +742,37 @@ class LLMClient {
         )
     }
 
+    internal fun isSupportedStructuredModel(provider: ProviderConfig, modelName: String): Boolean {
+        if (modelName.isBlank()) return false
+        if (provider.type == "qwen_asr" || provider.type == "volcengine_asr") return false
+
+        val normalized = normalizedModel(modelName)
+        val unsupportedTokens = listOf(
+            "embedding",
+            "embed",
+            "rerank",
+            "moderation",
+            "whisper",
+            "asr",
+            "tts",
+            "audio",
+            "image",
+            "vision",
+            "speech",
+            "transcribe",
+            "clip"
+        )
+        if (unsupportedTokens.any { normalized.contains(it) }) return false
+
+        return when (provider.type) {
+            "gemini" -> normalized.startsWith("gemini")
+            "anthropic" -> normalized.startsWith("claude")
+            "openai_responses", "openai" -> SUPPORTED_STRUCTURED_MODEL_PREFIXES.any { normalized.startsWith(it) } ||
+                SUPPORTED_STRUCTURED_MODEL_TOKENS.any { normalized.contains(it) }
+            else -> provider.capabilities.supportsStructuredOutput || provider.capabilities.supportsToolCalling
+        }
+    }
+
     private fun detectGemini(provider: ProviderConfig): ProviderDetectionResult {
         val base = provider.baseUrl.trimEnd('/').ifBlank { "https://generativelanguage.googleapis.com/v1beta" }
         val url = if (base.endsWith("/models")) base else "$base/models"
@@ -647,9 +787,10 @@ class LLMClient {
             }
             val body = response.body?.string().orEmpty()
             val parsedModels = parseGeminiModelsResponse(body)
+            val models = parsedModels.filter { isSupportedStructuredModel(provider, it) }
 
             return ProviderDetectionResult(
-                models = parsedModels.ifEmpty { provider.models },
+                models = models,
                 capabilities = ProviderCapabilities(
                     supportsModelList = true,
                     supportsStructuredOutput = true,
@@ -657,7 +798,7 @@ class LLMClient {
                     supportsThinkingBudget = true,
                     supportsAsr = false
                 ),
-                message = "Detected ${parsedModels.size} Gemini generateContent model(s)."
+                message = "Detected ${parsedModels.size} Gemini generateContent model(s), ${models.size} support native tools or structured output."
             )
         }
     }
@@ -810,5 +951,33 @@ class LLMClient {
     companion object {
         private const val CANDIDATE_TOOL_NAME = "emit_candidates"
         private const val MAX_LEARNED_ENTRIES = 12
+        private val SUPPORTED_STRUCTURED_MODEL_PREFIXES = listOf(
+            "gpt",
+            "o1",
+            "o3",
+            "o4",
+            "chatgpt",
+            "claude",
+            "gemini",
+            "qwen",
+            "deepseek",
+            "doubao",
+            "ernie",
+            "glm",
+            "kimi",
+            "hunyuan",
+            "moonshot",
+            "minimax",
+            "mistral",
+            "llama"
+        )
+        private val SUPPORTED_STRUCTURED_MODEL_TOKENS = listOf(
+            "gpt5",
+            "gpt-5",
+            "deepseek",
+            "qwen",
+            "gemini",
+            "doubao"
+        )
     }
 }

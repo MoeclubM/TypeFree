@@ -87,15 +87,19 @@ class TypeFreeIME : InputMethodService(),
 
         inputViewBindingJob?.cancel()
         inputViewBindingJob = uiScope.launch {
+            val pinyinState = combine(viewModel.pinyinBuffer, viewModel.pinyinCursor) { buffer, cursor ->
+                buffer to cursor
+            }
             combine(
-                viewModel.pinyinBuffer,
+                pinyinState,
                 viewModel.candidates,
                 viewModel.isChinese,
                 viewModel.recordingState,
                 viewModel.recordingError
-            ) { pinyinBuffer, candidates, isChinese, recordingState, recordingError ->
+            ) { pinyinStateValue, candidates, isChinese, recordingState, recordingError ->
                 NativeKeyboardView.State(
-                    pinyinBuffer = pinyinBuffer,
+                    pinyinBuffer = pinyinStateValue.first,
+                    pinyinCursor = pinyinStateValue.second,
                     candidates = candidates,
                     isChinese = isChinese,
                     recordingState = recordingState,

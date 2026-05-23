@@ -28,6 +28,9 @@ class InputViewModel(
     private val _pinyinBuffer = MutableStateFlow("")
     val pinyinBuffer: StateFlow<String> = _pinyinBuffer.asStateFlow()
 
+    private val _pinyinCursor = MutableStateFlow(0)
+    val pinyinCursor: StateFlow<Int> = _pinyinCursor.asStateFlow()
+
     private val _candidates = MutableStateFlow<List<Candidate>>(emptyList())
     val candidates: StateFlow<List<Candidate>> = _candidates.asStateFlow()
 
@@ -42,6 +45,7 @@ class InputViewModel(
 
     fun onStartInput() {
         _pinyinBuffer.value = ""
+        _pinyinCursor.value = 0
         _candidates.value = emptyList()
     }
 
@@ -58,7 +62,7 @@ class InputViewModel(
         val ic = service.currentInputConnection ?: return
         if (_isChinese.value) {
             if (isPinyinLetter(key)) {
-                _pinyinBuffer.value += key.lowercase()
+                insertPinyinLetter(key.lowercase())
                 updatePinyinCandidates()
             } else {
                 commitPendingComposition()
@@ -73,7 +77,12 @@ class InputViewModel(
     fun onBackspace() {
         val ic = service.currentInputConnection ?: return
         if (_isChinese.value && _pinyinBuffer.value.isNotEmpty()) {
-            _pinyinBuffer.value = _pinyinBuffer.value.dropLast(1)
+            val cursor = _pinyinCursor.value.coerceIn(0, _pinyinBuffer.value.length)
+            if (cursor > 0) {
+                val current = _pinyinBuffer.value
+                _pinyinBuffer.value = current.removeRange(cursor - 1, cursor)
+                _pinyinCursor.value = cursor - 1
+            }
             updatePinyinCandidates()
         } else {
             ic.deleteSurroundingText(1, 0)
@@ -89,12 +98,14 @@ class InputViewModel(
         } else if (_isChinese.value && _pinyinBuffer.value.isNotEmpty()) {
             ic.commitText(_pinyinBuffer.value, 1)
             _pinyinBuffer.value = ""
+            _pinyinCursor.value = 0
             _candidates.value = emptyList()
             ic.commitText(" ", 1)
             fetchContextPredictions()
         } else {
             ic.commitText(" ", 1)
             _pinyinBuffer.value = ""
+            _pinyinCursor.value = 0
             _candidates.value = emptyList()
             fetchContextPredictions()
         }
@@ -105,6 +116,7 @@ class InputViewModel(
         if (_isChinese.value && _pinyinBuffer.value.isNotEmpty()) {
             ic.commitText(_pinyinBuffer.value, 1)
             _pinyinBuffer.value = ""
+            _pinyinCursor.value = 0
             _candidates.value = emptyList()
             fetchContextPredictions()
         } else {
@@ -120,19 +132,13 @@ class InputViewModel(
     fun onPinyinClick(index: Int) {
         val current = _pinyinBuffer.value
         if (current.isEmpty()) return
-
-        val cutoff = if (index >= current.length) {
-            current.lastIndex
-        } else {
-            index.coerceAtLeast(0)
-        }
-        _pinyinBuffer.value = current.take(cutoff)
-        updatePinyinCandidates()
+        _pinyinCursor.value = index.coerceIn(0, current.length)
     }
 
     fun onToggleLanguage() {
         _isChinese.value = !_isChinese.value
         _pinyinBuffer.value = ""
+        _pinyinCursor.value = 0
         _candidates.value = emptyList()
         fetchContextPredictions()
     }
@@ -181,6 +187,7 @@ class InputViewModel(
         )
         service.currentInputConnection?.commitText(text, 1)
         _pinyinBuffer.value = ""
+        _pinyinCursor.value = 0
         _candidates.value = emptyList()
         fetchContextPredictions()
     }
@@ -200,6 +207,7 @@ class InputViewModel(
             ic.commitText(_pinyinBuffer.value, 1)
         }
         _pinyinBuffer.value = ""
+        _pinyinCursor.value = 0
         _candidates.value = emptyList()
     }
 
@@ -230,6 +238,13 @@ class InputViewModel(
     private fun getTypingContext(): String {
         val ic = service.currentInputConnection ?: return ""
         return ic.getTextBeforeCursor(CONTEXT_CHAR_COUNT, 0)?.toString() ?: ""
+    }
+
+    private fun insertPinyinLetter(letter: String) {
+        val current = _pinyinBuffer.value
+        val cursor = _pinyinCursor.value.coerceIn(0, current.length)
+        _pinyinBuffer.value = current.substring(0, cursor) + letter + current.substring(cursor)
+        _pinyinCursor.value = cursor + letter.length
     }
 
     private fun transcribeAudioFile(provider: com.typefree.ime.data.ProviderConfig, modelName: String, language: String, file: File) {

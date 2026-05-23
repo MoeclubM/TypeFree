@@ -148,9 +148,10 @@ class PinyinEngine(context: Context, private val preferenceManager: PreferenceMa
                     selectedText = selectedText,
                     context = contextText
                 )
-                if (entries.isNotEmpty()) {
-                    preferenceManager.addUserPinyinEntries(entries)
-                    pinyinDict.addUserEntries(entries)
+                val selectedEntries = entries.filter { entry -> selectedText.contains(entry.word) }
+                if (selectedEntries.isNotEmpty()) {
+                    preferenceManager.addUserPinyinEntries(selectedEntries)
+                    pinyinDict.addUserEntries(selectedEntries)
                 }
             } catch (e: CancellationException) {
                 throw e

@@ -59,6 +59,7 @@ import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.lifecycleScope
+import com.typefree.ime.data.ModelSettings
 import com.typefree.ime.data.PreferenceManager
 import com.typefree.ime.data.ProviderCapabilities
 import com.typefree.ime.data.ProviderConfig
@@ -305,7 +306,9 @@ private val TYPE_OPTIONS = listOf(
     "openai_responses" to "OpenAI Responses",
     "openai" to "OpenAI Chat / 兼容",
     "anthropic" to "Anthropic Messages",
-    "gemini" to "Gemini generateContent"
+    "gemini" to "Gemini generateContent",
+    "qwen_asr" to "百炼 Qwen ASR",
+    "volcengine_asr" to "火山豆包 ASR"
 )
 
 private data class SettingsSnapshot(
@@ -766,14 +769,13 @@ private fun ProviderDetailScreen(
     var baseUrl by remember(provider.id) { mutableStateOf(provider.baseUrl) }
     var apiKey by remember(provider.id) { mutableStateOf(provider.apiKey) }
     var type by remember(provider.id) { mutableStateOf(provider.type) }
-    var thinkingBudget by remember(provider.id) {
-        mutableStateOf(provider.thinkingBudget.takeIf { it > 0 }?.toString().orEmpty())
-    }
     var models by remember(provider.id) { mutableStateOf(provider.models) }
+    var modelSettings by remember(provider.id) { mutableStateOf(provider.modelSettings) }
     var capabilities by remember(provider.id) { mutableStateOf(provider.capabilities) }
     var detecting by remember(provider.id) { mutableStateOf(false) }
     var showAddModelDialog by remember(provider.id) { mutableStateOf(false) }
     var showDeleteDialog by remember(provider.id) { mutableStateOf(false) }
+    var editingModel by remember(provider.id) { mutableStateOf<String?>(null) }
     var detectedModelsDialog by remember(provider.id) { mutableStateOf<ProviderDetectionResult?>(null) }
     val context = LocalContext.current
 
@@ -783,8 +785,9 @@ private fun ProviderDetailScreen(
             baseUrl = baseUrl.trim(),
             apiKey = apiKey.trim(),
             type = type,
-            thinkingBudget = thinkingBudget.toIntOrNull() ?: 0,
+            thinkingBudget = provider.thinkingBudget,
             models = models,
+            modelSettings = modelSettings.filterKeys { it in models },
             capabilities = capabilities
         )
     }
@@ -817,15 +820,6 @@ private fun ProviderDetailScreen(
             visualTransformation = if (apiKey.isBlank()) VisualTransformation.None else PasswordVisualTransformation(),
             singleLine = true
         )
-        OutlinedTextField(
-            value = thinkingBudget,
-            onValueChange = { value -> thinkingBudget = value.filter { it.isDigit() } },
-            modifier = Modifier.fillMaxWidth(),
-            label = { Text("思考预算 tokens，0 或留空关闭") },
-            singleLine = true,
-            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number)
-        )
-
         SectionTitle("API 协议类型")
         TYPE_OPTIONS.forEach { option ->
             RadioSettingRow(
@@ -902,16 +896,26 @@ private fun ProviderDetailScreen(
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.spacedBy(10.dp)
                 ) {
-                    Text(
-                        text = model,
-                        modifier = Modifier.weight(1f),
-                        style = MaterialTheme.typography.bodyLarge
-                    )
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            text = model,
+                            style = MaterialTheme.typography.bodyLarge
+                        )
+                        Text(
+                            text = modelSettingsSummary(modelSettings[model]),
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                    TextButton(onClick = { editingModel = model }) {
+                        Text("设置")
+                    }
                     TextButton(
                         onClick = {
                             val updatedModels = models.filter { it != model }
+                            modelSettings = modelSettings - model
                             models = updatedModels
-                            onSaveProvider(buildProvider().copy(models = updatedModels))
+                            onSaveProvider(buildProvider().copy(models = updatedModels, modelSettings = modelSettings))
                         }
                     ) {
                         Text("删除")
@@ -942,6 +946,19 @@ private fun ProviderDetailScreen(
                     onSaveProvider(buildProvider().copy(models = updatedModels))
                 }
                 showAddModelDialog = false
+            }
+        )
+    }
+
+    editingModel?.let { model ->
+        ModelSettingsDialog(
+            model = model,
+            settings = modelSettings[model] ?: ModelSettings(),
+            onDismiss = { editingModel = null },
+            onSave = { settings ->
+                modelSettings = modelSettings + (model to settings)
+                onSaveProvider(buildProvider().copy(modelSettings = modelSettings + (model to settings)))
+                editingModel = null
             }
         )
     }
@@ -1169,7 +1186,15 @@ private fun MappingDialog(
     onSaveProvider: (ProviderConfig) -> Unit,
     onDetectProvider: (ProviderConfig, (ProviderDetectionResult) -> Unit) -> Unit
 ) {
-    if (providers.isEmpty()) {
+    val usableProviders = providers.filter { provider ->
+        when (state.target) {
+            BindingTarget.ASR -> provider.capabilities.supportsAsr
+            BindingTarget.PINYIN, BindingTarget.CONTEXT ->
+                provider.capabilities.supportsToolCalling || provider.capabilities.supportsStructuredOutput
+        }
+    }
+
+    if (usableProviders.isEmpty()) {
         AlertDialog(
             onDismissRequest = onDismiss,
             title = { Text(state.title) },
@@ -1184,15 +1209,18 @@ private fun MappingDialog(
     }
 
     var selectedProviderId by remember(state) {
-        mutableStateOf(state.providerId.takeIf { id -> providers.any { it.id == id } } ?: providers.first().id)
+        mutableStateOf(state.providerId.takeIf { id -> usableProviders.any { it.id == id } } ?: usableProviders.first().id)
     }
     var selectedModel by remember(state) { mutableStateOf(state.modelName) }
     var detecting by remember(state) { mutableStateOf(false) }
     var detectedModels by remember(state, selectedProviderId) { mutableStateOf<List<String>>(emptyList()) }
     var detectedCapabilities by remember(state, selectedProviderId) { mutableStateOf<ProviderCapabilities?>(null) }
 
-    val selectedProvider = providers.firstOrNull { it.id == selectedProviderId } ?: providers.first()
-    val availableModels = (selectedProvider.models + detectedModels).distinct()
+    val selectedProvider = usableProviders.firstOrNull { it.id == selectedProviderId } ?: usableProviders.first()
+    val boundModel = state.modelName.takeIf { selectedProvider.id == state.providerId }.orEmpty()
+    val availableModels = (selectedProvider.models + detectedModels + boundModel)
+        .filter { it.isNotBlank() }
+        .distinct()
     LaunchedEffect(selectedProviderId, providers, detectedModels) {
         if (selectedModel !in availableModels) {
             selectedModel = availableModels.firstOrNull().orEmpty()
@@ -1210,7 +1238,7 @@ private fun MappingDialog(
                 verticalArrangement = Arrangement.spacedBy(10.dp)
             ) {
                 Text("API 服务商", style = MaterialTheme.typography.labelLarge)
-                providers.forEach { provider ->
+                usableProviders.forEach { provider ->
                     RadioSettingRow(
                         title = provider.name,
                         selected = provider.id == selectedProviderId,
@@ -1309,6 +1337,54 @@ private fun ChoiceDialog(
         },
         confirmButton = {
             TextButton(onClick = { onSelect(state.target, selectedValue) }) {
+                Text("保存")
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) {
+                Text("取消")
+            }
+        }
+    )
+}
+
+@Composable
+private fun ModelSettingsDialog(
+    model: String,
+    settings: ModelSettings,
+    onDismiss: () -> Unit,
+    onSave: (ModelSettings) -> Unit
+) {
+    var thinkingBudget by remember(model) {
+        mutableStateOf(settings.thinkingBudget.takeIf { it > 0 }?.toString().orEmpty())
+    }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text(model) },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                OutlinedTextField(
+                    value = thinkingBudget,
+                    onValueChange = { value -> thinkingBudget = value.filter { it.isDigit() } },
+                    modifier = Modifier.fillMaxWidth(),
+                    label = { Text("该模型思考预算 tokens，0 或留空关闭") },
+                    singleLine = true,
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number)
+                )
+                Text(
+                    text = "不同模型会自动映射到各自支持的参数，例如 OpenAI reasoning.effort、Gemini thinkingConfig、DeepSeek thinking。",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+        },
+        confirmButton = {
+            TextButton(
+                onClick = {
+                    onSave(ModelSettings(thinkingBudget = thinkingBudget.toIntOrNull() ?: 0))
+                }
+            ) {
                 Text("保存")
             }
         },
@@ -1509,6 +1585,15 @@ private fun capabilitiesSummary(capabilities: ProviderCapabilities): String {
         "未探测或未声明。点击获取模型列表后会探测模型和 API 能力。"
     } else {
         enabled.joinToString(" / ")
+    }
+}
+
+private fun modelSettingsSummary(settings: ModelSettings?): String {
+    val budget = settings?.thinkingBudget ?: 0
+    return if (budget > 0) {
+        "思考预算: $budget tokens"
+    } else {
+        "思考预算: 关闭"
     }
 }
 

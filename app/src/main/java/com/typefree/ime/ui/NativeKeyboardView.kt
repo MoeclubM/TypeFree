@@ -36,6 +36,7 @@ class NativeKeyboardView(context: Context) : LinearLayout(context) {
 
     data class State(
         val pinyinBuffer: String,
+        val pinyinCursor: Int,
         val candidates: List<Candidate>,
         val isChinese: Boolean,
         val recordingState: RecordingState,
@@ -50,7 +51,7 @@ class NativeKeyboardView(context: Context) : LinearLayout(context) {
     private var emojiSearchMode = false
     private var emojiSearchQuery = ""
     private var shiftActive = false
-    private var state = State("", emptyList(), true, RecordingState.IDLE, "")
+    private var state = State("", 0, emptyList(), true, RecordingState.IDLE, "")
     private var renderedToolbarSignature = ""
     private var renderedCandidateSignature = ""
     private var renderedPinyinSignature = ""
@@ -61,6 +62,7 @@ class NativeKeyboardView(context: Context) : LinearLayout(context) {
     private val activeBackspacePointers = mutableSetOf<Int>()
     private val targetRect = Rect()
     private val emojiEntries = EmojiCatalog.load(context)
+    private var lastPinyinTouchX = 0f
 
     private val repeatHandler = Handler(Looper.getMainLooper())
     private var repeatingBackspace = false
@@ -276,7 +278,16 @@ class NativeKeyboardView(context: Context) : LinearLayout(context) {
                     candidateHost.addView(scrollView, LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.MATCH_PARENT))
                 }
             }
-            isComposing() && state.candidates.isNotEmpty() -> {
+            isComposing() -> {
+                candidateHost.addView(
+                    pinyinEditView(),
+                    LayoutParams(LayoutParams.WRAP_CONTENT, LayoutParams.MATCH_PARENT).apply {
+                        rightMargin = dp(6)
+                    }
+                )
+                if (state.candidates.isEmpty()) {
+                    return
+                }
                 val scrollView = HorizontalScrollView(context).apply {
                     isHorizontalScrollBarEnabled = false
                     overScrollMode = OVER_SCROLL_NEVER
@@ -289,7 +300,7 @@ class NativeKeyboardView(context: Context) : LinearLayout(context) {
                     row.addView(candidateView(candidate))
                 }
                 scrollView.addView(row, LayoutParams(LayoutParams.WRAP_CONTENT, LayoutParams.MATCH_PARENT))
-                candidateHost.addView(scrollView, LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.MATCH_PARENT))
+                candidateHost.addView(scrollView, LayoutParams(0, LayoutParams.MATCH_PARENT, 1f))
             }
             else -> {
                 // Keep the candidate area empty when there is nothing actionable to show.
@@ -298,17 +309,17 @@ class NativeKeyboardView(context: Context) : LinearLayout(context) {
     }
 
     private fun renderPinyinBuffer() {
-        pinyinText.text = state.pinyinBuffer
+        pinyinText.text = pinyinDisplayText()
     }
 
     private fun renderTopVisibility() {
         val composing = isComposing()
         toolbarHost.visibility = if (composing) GONE else VISIBLE
-        pinyinText.visibility = if (composing) VISIBLE else GONE
+        pinyinText.visibility = GONE
         candidateHost.visibility = if (
             state.recordingState != RecordingState.IDLE ||
             emojiSearchMode ||
-            (composing && state.candidates.isNotEmpty())
+            composing
         ) VISIBLE else GONE
     }
 
@@ -351,6 +362,47 @@ class NativeKeyboardView(context: Context) : LinearLayout(context) {
             }
         }.also {
             it.layoutParams = LayoutParams(LayoutParams.WRAP_CONTENT, LayoutParams.MATCH_PARENT)
+        }
+    }
+
+    private fun pinyinEditView(): View {
+        return TextView(context).apply {
+            text = pinyinDisplayText()
+            textSize = 16f
+            typeface = Typeface.DEFAULT_BOLD
+            setTextColor(ACCENT_COLOR)
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(dp(10), 0, dp(10), 0)
+            minWidth = dp(48)
+            maxWidth = dp(116)
+            isSingleLine = true
+            ellipsize = TextUtils.TruncateAt.START
+            background = selectableBackground(PINYIN_CHIP_COLOR, dp(8), BORDER_COLOR)
+            setOnClickListener {
+                performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
+                val offset = getOffsetForPosition(lastPinyinTouchX, height / 2f)
+                callbacks?.onPinyinClick(displayOffsetToPinyinOffset(offset))
+            }
+            setOnTouchListener { view, event ->
+                when (event.actionMasked) {
+                    MotionEvent.ACTION_DOWN -> {
+                        lastPinyinTouchX = event.x
+                        view.isPressed = true
+                        true
+                    }
+                    MotionEvent.ACTION_UP -> {
+                        lastPinyinTouchX = event.x
+                        view.isPressed = false
+                        view.performClick()
+                        true
+                    }
+                    MotionEvent.ACTION_CANCEL -> {
+                        view.isPressed = false
+                        true
+                    }
+                    else -> true
+                }
+            }
         }
     }
 
@@ -687,13 +739,14 @@ class NativeKeyboardView(context: Context) : LinearLayout(context) {
                 "recording|${state.recordingState}|${state.recordingError}"
             }
             emojiSearchMode -> "emojiSearch|$emojiSearchQuery|${emojiSearchResults().joinToString("") { it.value }}"
+            isComposing() -> "pinyin|${state.pinyinBuffer}|${state.pinyinCursor}|${state.candidates.joinToString("|") { "${it.text}:${it.isAi}" }}"
             !isComposing() || state.candidates.isEmpty() -> "empty|${state.isChinese}|${isComposing()}"
             else -> state.candidates.joinToString("|") { "${it.text}:${it.isAi}" }
         }
     }
 
     private fun pinyinSignature(): String {
-        return "${state.isChinese}|${state.pinyinBuffer}"
+        return "${state.isChinese}|${state.pinyinBuffer}|${state.pinyinCursor}"
     }
 
     private fun topVisibilitySignature(): String {
@@ -702,6 +755,20 @@ class NativeKeyboardView(context: Context) : LinearLayout(context) {
 
     private fun isComposing(): Boolean {
         return state.isChinese && state.pinyinBuffer.isNotEmpty()
+    }
+
+    private fun pinyinDisplayText(): String {
+        val cursor = state.pinyinCursor.coerceIn(0, state.pinyinBuffer.length)
+        return state.pinyinBuffer.substring(0, cursor) + PINYIN_CURSOR + state.pinyinBuffer.substring(cursor)
+    }
+
+    private fun displayOffsetToPinyinOffset(offset: Int): Int {
+        val cursor = state.pinyinCursor.coerceIn(0, state.pinyinBuffer.length)
+        return if (offset <= cursor) {
+            offset
+        } else {
+            offset - PINYIN_CURSOR.length
+        }.coerceIn(0, state.pinyinBuffer.length)
     }
 
     private fun nextPage(current: Int, size: Int): Int {
@@ -827,6 +894,7 @@ class NativeKeyboardView(context: Context) : LinearLayout(context) {
         private const val PANEL_COLOR = 0xFFE8EAED.toInt()
         private const val TOOLBAR_COLOR = 0xFFF1F3F4.toInt()
         private const val SPECIAL_KEY_COLOR = 0xFFDADCE0.toInt()
+        private const val PINYIN_CHIP_COLOR = 0xFFEAF2FF.toInt()
         private const val BORDER_COLOR = 0x1F000000
         private const val RIPPLE_COLOR = 0x22000000
         private const val TEXT_COLOR = 0xFF202124.toInt()
@@ -839,5 +907,6 @@ class NativeKeyboardView(context: Context) : LinearLayout(context) {
         private const val EMOJI_RESULT_ROWS = 3
         private const val EMOJI_PER_PAGE = EMOJI_COLUMNS * EMOJI_RESULT_ROWS
         private const val EMOJI_SEARCH_RESULT_LIMIT = 80
+        private const val PINYIN_CURSOR = "|"
     }
 }
