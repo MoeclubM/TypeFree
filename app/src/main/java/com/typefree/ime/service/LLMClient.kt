@@ -2,6 +2,7 @@ package com.typefree.ime.service
 
 import android.util.Log
 import com.typefree.ime.data.AiRequestLog
+import com.typefree.ime.data.LlmTokenUsage
 import com.typefree.ime.data.PreferenceManager
 import com.typefree.ime.data.ProviderConfig
 import com.typefree.ime.data.ProviderCapabilities
@@ -38,6 +39,12 @@ data class ProviderDetectionResult(
 data class AiPinyinResult(
     val candidates: List<String>,
     val firstCandidateNextWord: String = ""
+)
+
+data class ModelTestResult(
+    val success: Boolean,
+    val message: String,
+    val streamingUsed: Boolean = false
 )
 
 class LLMClient(private val preferenceManager: PreferenceManager? = null) {
@@ -223,6 +230,57 @@ class LLMClient(private val preferenceManager: PreferenceManager? = null) {
         return parsed
     }
 
+    suspend fun testTextModel(provider: ProviderConfig, modelName: String): ModelTestResult {
+        if (modelName.isBlank()) {
+            return ModelTestResult(false, "模型为空")
+        }
+        if (requiresApiKey(provider)) {
+            return ModelTestResult(false, "未配置 API Key")
+        }
+        if (!isSupportedStructuredModel(provider, modelName)) {
+            return ModelTestResult(false, "该模型未声明原生工具调用或结构化输出能力")
+        }
+
+        val systemPrompt = """
+            You are a connectivity test for a Simplified Chinese IME.
+            Return only a JSON object with a candidates string array. No extra text.
+        """.trimIndent()
+        val userPrompt = """Return {"candidates":["测试通过"]}."""
+
+        var errorMessage: String? = null
+        val result = try {
+            when (provider.type) {
+                "anthropic" -> requestAnthropic(provider, modelName, systemPrompt, userPrompt)
+                "openai_responses" -> requestOpenAiResponses(provider, modelName, systemPrompt, userPrompt)
+                "gemini" -> requestGemini(provider, modelName, systemPrompt, userPrompt)
+                else -> requestOpenAiChat(provider, modelName, systemPrompt, userPrompt)
+            }
+        } catch (e: Exception) {
+            logError("Model test failed", e)
+            errorMessage = e.message
+            LlmTextResult(false, null)
+        }
+
+        val parsed = parseJsonList(result.text).filter { it.isNotBlank() }
+        logAiRequest(
+            provider = provider,
+            modelName = modelName,
+            feature = "model_test",
+            systemPrompt = systemPrompt,
+            userPrompt = userPrompt,
+            rawResponse = result.text,
+            parsedOutput = parsed,
+            error = errorMessage
+        )
+
+        return if (result.text != null && parsed.isNotEmpty()) {
+            val mode = if (result.streamingUsed) "流式" else "非流式"
+            ModelTestResult(true, "$mode 测试通过: ${parsed.first()}", result.streamingUsed)
+        } else {
+            ModelTestResult(false, errorMessage ?: "没有收到可解析的结构化输出", result.streamingUsed)
+        }
+    }
+
     suspend fun detectProvider(provider: ProviderConfig): ProviderDetectionResult = withContext(Dispatchers.IO) {
         try {
             when (provider.type) {
@@ -260,7 +318,17 @@ class LLMClient(private val preferenceManager: PreferenceManager? = null) {
         systemPrompt: String,
         userPrompt: String,
         includeNextWord: Boolean = false
-    ): String? = withContext(Dispatchers.IO) {
+    ): String? {
+        return requestOpenAiChat(provider, modelName, systemPrompt, userPrompt, includeNextWord).text
+    }
+
+    private suspend fun requestOpenAiChat(
+        provider: ProviderConfig,
+        modelName: String,
+        systemPrompt: String,
+        userPrompt: String,
+        includeNextWord: Boolean = false
+    ): LlmTextResult = withContext(Dispatchers.IO) {
         val url = if (provider.baseUrl.endsWith("/chat/completions")) provider.baseUrl else "${provider.baseUrl.trimEnd('/')}/chat/completions"
         val thinkingBudget = thinkingBudgetFor(provider, modelName)
         val modelSettings = provider.modelSettings[modelName]
@@ -271,11 +339,26 @@ class LLMClient(private val preferenceManager: PreferenceManager? = null) {
             responseFormat = openAiChatPrimaryResponseFormat(provider, modelName, includeNextWord),
             thinkingBudget = thinkingBudget,
             thinkingLevel = modelSettings?.thinkingLevel.orEmpty(),
-            providerType = provider.type
+            providerType = provider.type,
+            stream = false
         )
+        val primaryStreamBody = buildOpenAiChatRequestBody(
+            modelName = modelName,
+            systemPrompt = systemPrompt,
+            userPrompt = userPrompt,
+            responseFormat = openAiChatPrimaryResponseFormat(provider, modelName, includeNextWord),
+            thinkingBudget = thinkingBudget,
+            thinkingLevel = modelSettings?.thinkingLevel.orEmpty(),
+            providerType = provider.type,
+            stream = true
+        )
+        val primaryStreamResult = executeOpenAiChatStreaming(provider, url, primaryStreamBody)
+        if (primaryStreamResult.text != null) {
+            return@withContext primaryStreamResult
+        }
         val primaryResult = executeOpenAiChat(provider, url, primaryBody)
         if (primaryResult.text != null) {
-            return@withContext primaryResult.text
+            return@withContext primaryResult
         }
 
         val fallbackBody = buildOpenAiChatRequestBody(
@@ -285,14 +368,30 @@ class LLMClient(private val preferenceManager: PreferenceManager? = null) {
             responseFormat = openAiChatJsonObjectFormat(),
             thinkingBudget = 0,
             thinkingLevel = modelSettings?.thinkingLevel.orEmpty(),
-            providerType = provider.type
+            providerType = provider.type,
+            stream = false
         )
-        executeOpenAiChat(provider, url, fallbackBody).text
+        val fallbackStreamBody = buildOpenAiChatRequestBody(
+            modelName = modelName,
+            systemPrompt = systemPrompt,
+            userPrompt = userPrompt,
+            responseFormat = openAiChatJsonObjectFormat(),
+            thinkingBudget = 0,
+            thinkingLevel = modelSettings?.thinkingLevel.orEmpty(),
+            providerType = provider.type,
+            stream = true
+        )
+        val fallbackStreamResult = executeOpenAiChatStreaming(provider, url, fallbackStreamBody)
+        if (fallbackStreamResult.text != null) {
+            return@withContext fallbackStreamResult
+        }
+        executeOpenAiChat(provider, url, fallbackBody)
     }
 
     private data class LlmTextResult(
         val success: Boolean,
-        val text: String?
+        val text: String?,
+        val streamingUsed: Boolean = false
     )
 
     internal fun buildOpenAiChatRequestBody(
@@ -302,7 +401,8 @@ class LLMClient(private val preferenceManager: PreferenceManager? = null) {
         responseFormat: JsonObject,
         thinkingBudget: Int,
         thinkingLevel: String = "",
-        providerType: String = "openai"
+        providerType: String = "openai",
+        stream: Boolean = false
     ): String {
         return buildJsonObject {
             put("model", modelName)
@@ -312,13 +412,21 @@ class LLMClient(private val preferenceManager: PreferenceManager? = null) {
             }
             put("temperature", 0.3)
             put("response_format", responseFormat)
+            if (stream) {
+                put("stream", true)
+            }
             putOpenAiChatThinking(modelName, providerType, thinkingBudget, thinkingLevel)
         }.toString()
     }
 
     private fun JsonObjectBuilder.putOpenAiChatThinking(modelName: String, providerType: String, thinkingBudget: Int, configuredLevel: String) {
         val thinkingLevel = thinkingLevelFor(modelName, configuredLevel, thinkingBudget)
-        if (thinkingBudget <= 0 && thinkingLevel.isBlank()) return
+        if (thinkingBudget <= 0 && thinkingLevel.isBlank()) {
+            if (isOpenAiReasoningModel(modelName) && openAiSupportsReasoningNone(modelName)) {
+                put("reasoning_effort", "none")
+            }
+            return
+        }
         if (isDeepSeekModel(modelName) || providerType == "deepseek") {
             put("reasoning_effort", thinkingLevel.ifBlank { deepSeekReasoningEffort(thinkingBudget) })
             putJsonObject("thinking") {
@@ -363,37 +471,95 @@ class LLMClient(private val preferenceManager: PreferenceManager? = null) {
         }
     }
 
+    private fun executeOpenAiChatStreaming(provider: ProviderConfig, url: String, requestBodyJson: String): LlmTextResult {
+        val request = authorizedPostRequest(provider, url, requestBodyJson)
+        return client.newCall(request).execute().use { response ->
+            if (!response.isSuccessful) {
+                logError("OpenAI streaming call failed: ${response.code} ${response.message}")
+                return LlmTextResult(false, null, streamingUsed = true)
+            }
+            val source = response.body?.source() ?: return LlmTextResult(true, null, streamingUsed = true)
+            val output = StringBuilder()
+            while (true) {
+                val line = source.readUtf8Line() ?: break
+                if (!line.startsWith("data:")) continue
+                val data = line.removePrefix("data:").trim()
+                if (data.isBlank()) continue
+                if (data == "[DONE]") break
+                val delta = runCatching {
+                    val element = json.parseToJsonElement(data)
+                    val choice = element.jsonObject["choices"]?.jsonArray?.firstOrNull()?.jsonObject
+                    choice
+                        ?.get("delta")
+                        ?.jsonObject
+                        ?.get("content")
+                        ?.jsonPrimitive
+                        ?.contentOrNull
+                }.getOrNull()
+                if (!delta.isNullOrEmpty()) {
+                    output.append(delta)
+                }
+            }
+            LlmTextResult(true, output.toString().takeIf { it.isNotBlank() }, streamingUsed = true)
+        }
+    }
+
     private suspend fun callOpenAiResponses(
         provider: ProviderConfig,
         modelName: String,
         systemPrompt: String,
         userPrompt: String,
         includeNextWord: Boolean = false
-    ): String? = withContext(Dispatchers.IO) {
+    ): String? {
+        return requestOpenAiResponses(provider, modelName, systemPrompt, userPrompt, includeNextWord).text
+    }
+
+    private suspend fun requestOpenAiResponses(
+        provider: ProviderConfig,
+        modelName: String,
+        systemPrompt: String,
+        userPrompt: String,
+        includeNextWord: Boolean = false
+    ): LlmTextResult = withContext(Dispatchers.IO) {
         val url = if (provider.baseUrl.endsWith("/responses")) provider.baseUrl else "${provider.baseUrl.trimEnd('/')}/responses"
         val settings = provider.modelSettings[modelName]
+        val streamRequestBodyJson = buildOpenAiResponsesRequestBody(
+            modelName,
+            systemPrompt,
+            userPrompt,
+            thinkingBudgetFor(provider, modelName),
+            settings?.thinkingLevel.orEmpty(),
+            includeNextWord,
+            stream = true
+        )
+        val streamResult = executeOpenAiResponsesStreaming(provider, url, streamRequestBodyJson)
+        if (streamResult.text != null) {
+            return@withContext streamResult
+        }
+
         val requestBodyJson = buildOpenAiResponsesRequestBody(
             modelName,
             systemPrompt,
             userPrompt,
             thinkingBudgetFor(provider, modelName),
             settings?.thinkingLevel.orEmpty(),
-            includeNextWord
+            includeNextWord,
+            stream = false
         )
 
         val request = authorizedPostRequest(provider, url, requestBodyJson)
         client.newCall(request).execute().use { response ->
             if (!response.isSuccessful) {
                 logError("OpenAI Responses call failed: ${response.code} ${response.message}")
-                return@withContext null
+                return@withContext LlmTextResult(false, null)
             }
-            val responseBody = response.body?.string() ?: return@withContext null
+            val responseBody = response.body?.string() ?: return@withContext LlmTextResult(true, null)
             try {
                 val element = json.parseToJsonElement(responseBody)
-                extractOpenAiResponseText(element.jsonObject)
+                LlmTextResult(true, extractOpenAiResponseText(element.jsonObject))
             } catch (e: Exception) {
                 logError("Failed to parse OpenAI Responses body", e)
-                null
+                LlmTextResult(true, null)
             }
         }
     }
@@ -404,7 +570,8 @@ class LLMClient(private val preferenceManager: PreferenceManager? = null) {
         userPrompt: String,
         thinkingBudget: Int,
         thinkingLevel: String = "",
-        includeNextWord: Boolean = false
+        includeNextWord: Boolean = false,
+        stream: Boolean = false
     ): String {
         return buildJsonObject {
             put("model", modelName)
@@ -412,6 +579,9 @@ class LLMClient(private val preferenceManager: PreferenceManager? = null) {
             put("input", userPrompt)
             putJsonObject("text") {
                 put("format", openAiResponsesJsonSchemaFormat(includeNextWord))
+            }
+            if (stream) {
+                put("stream", true)
             }
             val effort = openAiResponsesReasoningEffort(modelName, thinkingBudget, thinkingLevel)
             if (effort != null) {
@@ -422,37 +592,100 @@ class LLMClient(private val preferenceManager: PreferenceManager? = null) {
         }.toString()
     }
 
+    private fun executeOpenAiResponsesStreaming(provider: ProviderConfig, url: String, requestBodyJson: String): LlmTextResult {
+        val request = authorizedPostRequest(provider, url, requestBodyJson)
+        return client.newCall(request).execute().use { response ->
+            if (!response.isSuccessful) {
+                logError("OpenAI Responses streaming call failed: ${response.code} ${response.message}")
+                return LlmTextResult(false, null, streamingUsed = true)
+            }
+            val source = response.body?.source() ?: return LlmTextResult(true, null, streamingUsed = true)
+            val output = StringBuilder()
+            var completedText: String? = null
+            while (true) {
+                val line = source.readUtf8Line() ?: break
+                if (!line.startsWith("data:")) continue
+                val data = line.removePrefix("data:").trim()
+                if (data.isBlank()) continue
+                if (data == "[DONE]") break
+                runCatching {
+                    val obj = json.parseToJsonElement(data).jsonObject
+                    when (obj["type"]?.jsonPrimitive?.contentOrNull) {
+                        "response.output_text.delta" -> {
+                            obj["delta"]?.jsonPrimitive?.contentOrNull?.let(output::append)
+                        }
+                        "response.output_text.done" -> {
+                            completedText = obj["text"]?.jsonPrimitive?.contentOrNull
+                        }
+                        "response.completed" -> {
+                            val responseObject = obj["response"]?.jsonObject
+                            if (responseObject != null) {
+                                completedText = extractOpenAiResponseText(responseObject)
+                            }
+                        }
+                        "response.failed" -> {
+                            logError("OpenAI Responses streaming failed event: $data")
+                        }
+                        else -> {
+                            obj["delta"]?.jsonPrimitive?.contentOrNull?.let(output::append)
+                        }
+                    }
+                }.onFailure {
+                    logError("Failed to parse OpenAI Responses stream event", it)
+                }
+            }
+            val text = output.toString().takeIf { it.isNotBlank() } ?: completedText
+            LlmTextResult(true, text, streamingUsed = true)
+        }
+    }
+
     private suspend fun callAnthropic(
         provider: ProviderConfig,
         modelName: String,
         systemPrompt: String,
         userPrompt: String,
         includeNextWord: Boolean = false
-    ): String? = withContext(Dispatchers.IO) {
+    ): String? {
+        return requestAnthropic(provider, modelName, systemPrompt, userPrompt, includeNextWord).text
+    }
+
+    private suspend fun requestAnthropic(
+        provider: ProviderConfig,
+        modelName: String,
+        systemPrompt: String,
+        userPrompt: String,
+        includeNextWord: Boolean = false
+    ): LlmTextResult = withContext(Dispatchers.IO) {
         val url = if (provider.baseUrl.endsWith("/messages")) provider.baseUrl else "${provider.baseUrl.trimEnd('/')}/messages"
+        val streamRequestBodyJson = buildAnthropicRequestBody(
+            modelName,
+            systemPrompt,
+            userPrompt,
+            thinkingBudgetFor(provider, modelName),
+            includeNextWord,
+            stream = true
+        )
+        val streamResult = executeAnthropicStreaming(provider, url, streamRequestBodyJson)
+        if (streamResult.text != null) {
+            return@withContext streamResult
+        }
+
         val requestBodyJson = buildAnthropicRequestBody(
             modelName,
             systemPrompt,
             userPrompt,
             thinkingBudgetFor(provider, modelName),
-            includeNextWord
+            includeNextWord,
+            stream = false
         )
-        val body = requestBodyJson.toRequestBody(jsonMediaType)
-
-        val request = Request.Builder()
-            .url(url)
-            .post(body)
-            .addHeader("Content-Type", "application/json")
-            .addHeader("x-api-key", provider.apiKey)
-            .addHeader("anthropic-version", "2023-06-01")
-            .build()
+        val request = anthropicPostRequest(provider, url, requestBodyJson)
 
         client.newCall(request).execute().use { response ->
             if (!response.isSuccessful) {
                 logError("Anthropic call failed: ${response.code} ${response.message}")
-                return@withContext null
+                return@withContext LlmTextResult(false, null)
             }
-            val responseBody = response.body?.string() ?: return@withContext null
+            val responseBody = response.body?.string() ?: return@withContext LlmTextResult(true, null)
 
             // Extract the content from Anthropic messages JSON
             try {
@@ -462,7 +695,7 @@ class LLMClient(private val preferenceManager: PreferenceManager? = null) {
                     ?.mapNotNull { it as? JsonObject }
                     ?.firstOrNull { it["type"]?.jsonPrimitive?.contentOrNull == "tool_use" }
                 val toolInput = toolUse?.get("input")
-                if (toolInput != null) {
+                val text = if (toolInput != null) {
                     toolInput.toString()
                 } else {
                     val firstText = contentArray
@@ -470,9 +703,10 @@ class LLMClient(private val preferenceManager: PreferenceManager? = null) {
                         ?.firstOrNull { it["type"]?.jsonPrimitive?.contentOrNull == "text" }
                     firstText?.get("text")?.jsonPrimitive?.content
                 }
+                LlmTextResult(true, text)
             } catch (e: Exception) {
                 logError("Failed to parse Anthropic response body", e)
-                null
+                LlmTextResult(true, null)
             }
         }
     }
@@ -482,7 +716,8 @@ class LLMClient(private val preferenceManager: PreferenceManager? = null) {
         systemPrompt: String,
         userPrompt: String,
         thinkingBudget: Int,
-        includeNextWord: Boolean = false
+        includeNextWord: Boolean = false,
+        stream: Boolean = false
     ): String {
         val normalizedThinkingBudget = normalizedAnthropicThinkingBudget(thinkingBudget)
         val maxTokens = maxOf(300, normalizedThinkingBudget + 220)
@@ -490,6 +725,9 @@ class LLMClient(private val preferenceManager: PreferenceManager? = null) {
             put("model", modelName)
             put("system", systemPrompt)
             put("max_tokens", maxTokens)
+            if (stream) {
+                put("stream", true)
+            }
             if (normalizedThinkingBudget == 0) {
                 put("temperature", 0.3)
             }
@@ -514,15 +752,63 @@ class LLMClient(private val preferenceManager: PreferenceManager? = null) {
         }.toString()
     }
 
+    private fun anthropicPostRequest(provider: ProviderConfig, url: String, requestBodyJson: String): Request {
+        return Request.Builder()
+            .url(url)
+            .post(requestBodyJson.toRequestBody(jsonMediaType))
+            .addHeader("Content-Type", "application/json")
+            .addHeader("x-api-key", provider.apiKey)
+            .addHeader("anthropic-version", "2023-06-01")
+            .build()
+    }
+
+    private fun executeAnthropicStreaming(provider: ProviderConfig, url: String, requestBodyJson: String): LlmTextResult {
+        val request = anthropicPostRequest(provider, url, requestBodyJson)
+        return client.newCall(request).execute().use { response ->
+            if (!response.isSuccessful) {
+                logError("Anthropic streaming call failed: ${response.code} ${response.message}")
+                return LlmTextResult(false, null, streamingUsed = true)
+            }
+            val source = response.body?.source() ?: return LlmTextResult(true, null, streamingUsed = true)
+            val output = StringBuilder()
+            while (true) {
+                val line = source.readUtf8Line() ?: break
+                if (!line.startsWith("data:")) continue
+                val data = line.removePrefix("data:").trim()
+                if (data.isBlank() || data == "[DONE]") continue
+                runCatching {
+                    val obj = json.parseToJsonElement(data).jsonObject
+                    val delta = obj["delta"]?.jsonObject
+                    delta?.get("text")?.jsonPrimitive?.contentOrNull?.let(output::append)
+                    delta?.get("partial_json")?.jsonPrimitive?.contentOrNull?.let(output::append)
+                    val contentBlock = obj["content_block"]?.jsonObject
+                    contentBlock?.get("text")?.jsonPrimitive?.contentOrNull?.let(output::append)
+                }.onFailure {
+                    logError("Failed to parse Anthropic stream event", it)
+                }
+            }
+            LlmTextResult(true, output.toString().takeIf { it.isNotBlank() }, streamingUsed = true)
+        }
+    }
+
     private suspend fun callGemini(
         provider: ProviderConfig,
         modelName: String,
         systemPrompt: String,
         userPrompt: String,
         includeNextWord: Boolean = false
-    ): String? = withContext(Dispatchers.IO) {
-        val base = provider.baseUrl.trimEnd('/').ifBlank { "https://generativelanguage.googleapis.com/v1beta" }
-        val url = if (base.endsWith(":generateContent")) base else "$base/models/$modelName:generateContent"
+    ): String? {
+        return requestGemini(provider, modelName, systemPrompt, userPrompt, includeNextWord).text
+    }
+
+    private suspend fun requestGemini(
+        provider: ProviderConfig,
+        modelName: String,
+        systemPrompt: String,
+        userPrompt: String,
+        includeNextWord: Boolean = false
+    ): LlmTextResult = withContext(Dispatchers.IO) {
+        val url = geminiGenerateContentUrl(provider, modelName)
         val settings = provider.modelSettings[modelName]
         val requestBodyJson = buildGeminiRequestBody(
             modelName,
@@ -533,23 +819,20 @@ class LLMClient(private val preferenceManager: PreferenceManager? = null) {
             includeNextWord
         )
 
-        val requestBuilder = Request.Builder()
-            .url(url)
-            .post(requestBodyJson.toRequestBody(jsonMediaType))
-            .addHeader("Content-Type", "application/json")
-        if (provider.apiKey.isNotEmpty()) {
-            requestBuilder.addHeader("x-goog-api-key", provider.apiKey)
+        val streamResult = executeGeminiStreaming(provider, geminiStreamGenerateContentUrl(url), requestBodyJson)
+        if (streamResult.text != null) {
+            return@withContext streamResult
         }
 
-        client.newCall(requestBuilder.build()).execute().use { response ->
+        client.newCall(geminiPostRequest(provider, url, requestBodyJson)).execute().use { response ->
             if (!response.isSuccessful) {
                 logError("Gemini call failed: ${response.code} ${response.message}")
-                return@withContext null
+                return@withContext LlmTextResult(false, null)
             }
-            val responseBody = response.body?.string() ?: return@withContext null
+            val responseBody = response.body?.string() ?: return@withContext LlmTextResult(true, null)
             try {
                 val element = json.parseToJsonElement(responseBody)
-                element.jsonObject["candidates"]
+                val text = element.jsonObject["candidates"]
                     ?.jsonArray
                     ?.firstOrNull()
                     ?.jsonObject
@@ -562,9 +845,10 @@ class LLMClient(private val preferenceManager: PreferenceManager? = null) {
                     ?.get("text")
                     ?.jsonPrimitive
                     ?.content
+                LlmTextResult(true, text)
             } catch (e: Exception) {
                 logError("Failed to parse Gemini response body", e)
-                null
+                LlmTextResult(true, null)
             }
         }
     }
@@ -609,6 +893,68 @@ class LLMClient(private val preferenceManager: PreferenceManager? = null) {
                 }
             }
         }.toString()
+    }
+
+    private fun geminiGenerateContentUrl(provider: ProviderConfig, modelName: String): String {
+        val base = provider.baseUrl.trimEnd('/').ifBlank { "https://generativelanguage.googleapis.com/v1beta" }
+        return if (base.endsWith(":generateContent")) base else "$base/models/$modelName:generateContent"
+    }
+
+    private fun geminiStreamGenerateContentUrl(generateUrl: String): String {
+        val base = generateUrl.removeSuffix("?alt=sse")
+            .replace(":generateContent", ":streamGenerateContent")
+        return if (base.contains("?")) "$base&alt=sse" else "$base?alt=sse"
+    }
+
+    private fun geminiPostRequest(provider: ProviderConfig, url: String, requestBodyJson: String): Request {
+        val requestBuilder = Request.Builder()
+            .url(url)
+            .post(requestBodyJson.toRequestBody(jsonMediaType))
+            .addHeader("Content-Type", "application/json")
+        if (provider.apiKey.isNotEmpty()) {
+            requestBuilder.addHeader("x-goog-api-key", provider.apiKey)
+        }
+        return requestBuilder.build()
+    }
+
+    private fun executeGeminiStreaming(provider: ProviderConfig, url: String, requestBodyJson: String): LlmTextResult {
+        val request = geminiPostRequest(provider, url, requestBodyJson)
+        return client.newCall(request).execute().use { response ->
+            if (!response.isSuccessful) {
+                logError("Gemini streaming call failed: ${response.code} ${response.message}")
+                return LlmTextResult(false, null, streamingUsed = true)
+            }
+            val source = response.body?.source() ?: return LlmTextResult(true, null, streamingUsed = true)
+            val output = StringBuilder()
+            while (true) {
+                val line = source.readUtf8Line() ?: break
+                if (!line.startsWith("data:")) continue
+                val data = line.removePrefix("data:").trim()
+                if (data.isBlank()) continue
+                runCatching {
+                    val element = json.parseToJsonElement(data)
+                    val text = element.jsonObject["candidates"]
+                        ?.jsonArray
+                        ?.firstOrNull()
+                        ?.jsonObject
+                        ?.get("content")
+                        ?.jsonObject
+                        ?.get("parts")
+                        ?.jsonArray
+                        ?.firstOrNull()
+                        ?.jsonObject
+                        ?.get("text")
+                        ?.jsonPrimitive
+                        ?.contentOrNull
+                    if (!text.isNullOrEmpty()) {
+                        output.append(text)
+                    }
+                }.onFailure {
+                    logError("Failed to parse Gemini stream event", it)
+                }
+            }
+            LlmTextResult(true, output.toString().takeIf { it.isNotBlank() }, streamingUsed = true)
+        }
     }
 
     private fun authorizedPostRequest(provider: ProviderConfig, url: String, requestBodyJson: String): Request {
@@ -751,18 +1097,17 @@ class LLMClient(private val preferenceManager: PreferenceManager? = null) {
     private fun openAiResponsesReasoningEffort(modelName: String, budget: Int): String? {
         if (!isOpenAiReasoningModel(modelName)) return null
         if (budget <= 0) {
-            return if (normalizedModel(modelName).contains("gpt51") || normalizedModel(modelName).contains("gpt-51")) {
-                "none"
-            } else {
-                null
-            }
+            return if (openAiSupportsReasoningNone(modelName)) "none" else null
         }
         return openAiReasoningEffort(modelName, budget)
     }
 
     private fun openAiResponsesReasoningEffort(modelName: String, budget: Int, level: String): String? {
         val cleaned = level.trim().lowercase(Locale.US)
-        if (cleaned.isNotBlank()) return cleaned
+        if (cleaned.isNotBlank()) {
+            if (cleaned == "none" && !openAiSupportsReasoningNone(modelName)) return null
+            return cleaned
+        }
         return openAiResponsesReasoningEffort(modelName, budget)
     }
 
@@ -807,6 +1152,23 @@ class LLMClient(private val preferenceManager: PreferenceManager? = null) {
 
     private fun normalizedModel(modelName: String): String {
         return modelName.lowercase(Locale.US).replace(".", "").replace("_", "-")
+    }
+
+    private fun openAiSupportsReasoningNone(modelName: String): Boolean {
+        val normalized = normalizedModel(modelName)
+        if (normalized.startsWith("o")) return true
+        val minor = gpt5MinorVersion(modelName) ?: return false
+        return minor >= 1
+    }
+
+    private fun gpt5MinorVersion(modelName: String): Int? {
+        val lower = modelName.lowercase(Locale.US)
+        return Regex("""gpt[-_]?5(?:[.-]?(\d+))?""")
+            .find(lower)
+            ?.groupValues
+            ?.getOrNull(1)
+            ?.takeIf { it.isNotBlank() }
+            ?.toIntOrNull()
     }
 
     private fun thinkingEffort(budget: Int): String {

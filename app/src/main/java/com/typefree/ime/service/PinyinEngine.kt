@@ -8,7 +8,8 @@ import kotlinx.coroutines.*
 
 data class Candidate(
     val text: String,
-    val isAi: Boolean = false
+    val isAi: Boolean = false,
+    val isPlaceholder: Boolean = false
 )
 
 class PinyinEngine(context: Context, private val preferenceManager: PreferenceManager) {
@@ -61,15 +62,19 @@ class PinyinEngine(context: Context, private val preferenceManager: PreferenceMa
             val provider = preferenceManager.getProvider(providerId)
             val modelName = preferenceManager.getPinyinModelName()
             if (provider == null || !provider.enabled) return
+            latestAiCandidates = listOf(THINKING_CANDIDATE)
+            emitMergedCandidates(listener)
             
             llmJob = scope.launch {
                 try {
-                    // Slight delay to avoid hammering the LLM while rapid typing (debounce)
-                    delay(300)
+                    val debounceMs = preferenceManager.getAiCandidateDebounceMs()
+                    if (debounceMs > 0) {
+                        delay(debounceMs.toLong())
+                    }
                     
                     val result = llmClient.translatePinyinWithPrediction(provider, modelName, pinyin, contextText)
                     val aiWords = withPredictedNextWord(result)
-                    if (aiWords.isNotEmpty() && latestPinyinInput == pinyin) {
+                    if (latestPinyinInput == pinyin) {
                         latestAiCandidates = aiWords.map { Candidate(it, isAi = true) }
                         emitMergedCandidates(listener)
                     }
@@ -77,6 +82,10 @@ class PinyinEngine(context: Context, private val preferenceManager: PreferenceMa
                     // Task was cancelled, ignore
                 } catch (e: Exception) {
                     Log.e("PinyinEngine", "LLM translation failed", e)
+                    if (latestPinyinInput == pinyin) {
+                        latestAiCandidates = emptyList()
+                        emitMergedCandidates(listener)
+                    }
                 }
             }
         }
@@ -88,6 +97,8 @@ class PinyinEngine(context: Context, private val preferenceManager: PreferenceMa
         contextText: String = "",
         learnAiSelection: Boolean = false
     ): String {
+        preferenceManager.recordWordUse(sourcePinyin, candidate.text)
+        pinyinDict.recordWordUse(sourcePinyin, candidate.text)
         if (learnAiSelection && candidate.isAi && sourcePinyin.isNotBlank()) {
             learnSelectedAiCandidate(sourcePinyin, candidate.text, contextText)
         }
@@ -113,19 +124,21 @@ class PinyinEngine(context: Context, private val preferenceManager: PreferenceMa
             listener.onCandidatesUpdated(emptyList())
             return
         }
+        listener.onCandidatesUpdated(listOf(THINKING_CANDIDATE))
         
         llmJob = scope.launch {
             try {
                 // Fetch predictions
                 val predictedWords = llmClient.predictNextWords(provider, modelName, contextText)
-                if (predictedWords.isNotEmpty()) {
-                    val candidates = predictedWords.map { Candidate(it, isAi = true) }
-                    withContext(Dispatchers.Main) {
-                        listener.onCandidatesUpdated(candidates)
-                    }
+                val candidates = predictedWords.map { Candidate(it, isAi = true) }
+                withContext(Dispatchers.Main) {
+                    listener.onCandidatesUpdated(candidates)
                 }
             } catch (e: Exception) {
                 Log.e("PinyinEngine", "LLM context prediction failed", e)
+                withContext(Dispatchers.Main) {
+                    listener.onCandidatesUpdated(emptyList())
+                }
             }
         }
     }
@@ -137,7 +150,9 @@ class PinyinEngine(context: Context, private val preferenceManager: PreferenceMa
     }
 
     private fun emitMergedCandidates(listener: CandidateListener) {
-        listener.onCandidatesUpdated((latestAiCandidates + latestLocalCandidates).distinctBy { it.text })
+        val placeholders = latestAiCandidates.filter { it.isPlaceholder }
+        val realAiCandidates = latestAiCandidates.filterNot { it.isPlaceholder }
+        listener.onCandidatesUpdated((latestLocalCandidates + realAiCandidates + placeholders).distinctBy { it.text })
     }
 
     private fun withPredictedNextWord(result: AiPinyinResult): List<String> {
@@ -155,16 +170,29 @@ class PinyinEngine(context: Context, private val preferenceManager: PreferenceMa
         val modelName = preferenceManager.getPinyinModelName()
         if (provider == null || !provider.enabled) return
 
+        val scanWords = dictionaryScanWords(selectedText)
+        val existingEntries = pinyinDict.entriesForWords(scanWords)
+        val selectedAlreadyExists = pinyinDict.containsEntry(sourcePinyin, selectedText)
+        val missingSingleWords = selectedText.codePointStrings()
+            .filter { it.isLikelyCjkCharacter() }
+            .filterNot { pinyinDict.containsWord(it) }
+        if (selectedAlreadyExists && missingSingleWords.isEmpty()) return
+
         scope.launch {
             try {
-                val entries = llmClient.segmentSelectedCandidate(
+                val aiEntries = llmClient.segmentSelectedCandidate(
                     provider = provider,
                     modelName = modelName,
                     sourcePinyin = sourcePinyin,
                     selectedText = selectedText,
-                    context = contextText
+                    context = contextText,
+                    existingEntries = existingEntries
                 )
-                val selectedEntries = entries.filter { entry -> selectedText.contains(entry.word) }
+                val fallbackSingleEntries = pinyinDict.missingSingleCharacterEntries(sourcePinyin, selectedText)
+                val selectedEntries = (aiEntries + fallbackSingleEntries)
+                    .filter { entry -> selectedText.contains(entry.word) }
+                    .filterNot { entry -> pinyinDict.containsEntry(entry.pinyin, entry.word) }
+                    .distinctBy { "${it.pinyin}\u0000${it.word}" }
                 if (selectedEntries.isNotEmpty()) {
                     preferenceManager.addUserPinyinEntries(selectedEntries)
                     pinyinDict.addUserEntries(selectedEntries)
@@ -175,5 +203,43 @@ class PinyinEngine(context: Context, private val preferenceManager: PreferenceMa
                 Log.e("PinyinEngine", "LLM dictionary segmentation failed", e)
             }
         }
+    }
+
+    private fun dictionaryScanWords(text: String): Set<String> {
+        val words = LinkedHashSet<String>()
+        val cleaned = text.trim()
+        if (cleaned.isNotBlank()) {
+            words.add(cleaned)
+        }
+        cleaned.codePointStrings()
+            .filter { it.isLikelyCjkCharacter() }
+            .forEach { words.add(it) }
+        return words
+    }
+
+    private fun String.codePointStrings(): List<String> {
+        val values = mutableListOf<String>()
+        var index = 0
+        while (index < length) {
+            val codePoint = codePointAt(index)
+            values.add(String(Character.toChars(codePoint)))
+            index += Character.charCount(codePoint)
+        }
+        return values
+    }
+
+    private fun String.isLikelyCjkCharacter(): Boolean {
+        if (isEmpty()) return false
+        val codePoint = codePointAt(0)
+        return codePoint in 0x4E00..0x9FFF ||
+            codePoint in 0x3400..0x4DBF ||
+            codePoint in 0x20000..0x2A6DF ||
+            codePoint in 0x2A700..0x2B73F ||
+            codePoint in 0x2B740..0x2B81F ||
+            codePoint in 0x2B820..0x2CEAF
+    }
+
+    companion object {
+        private val THINKING_CANDIDATE = Candidate("thinking", isAi = true, isPlaceholder = true)
     }
 }

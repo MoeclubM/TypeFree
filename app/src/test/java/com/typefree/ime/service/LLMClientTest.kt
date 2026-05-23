@@ -94,6 +94,20 @@ class LLMClientTest {
     }
 
     @Test
+    fun gpt53SeriesCanExplicitlyDisableReasoning() {
+        val body = parseObject(client.buildOpenAiResponsesRequestBody("gpt-5.3-codex-spark", "system", "user", 0, ""))
+
+        assertEquals("none", body["reasoning"]?.jsonObject?.get("effort")?.jsonPrimitive?.content)
+    }
+
+    @Test
+    fun openAiResponsesCanRequestStreaming() {
+        val body = parseObject(client.buildOpenAiResponsesRequestBody("gpt-5.3-codex-spark", "system", "user", 0, "", stream = true))
+
+        assertEquals("true", body["stream"]?.jsonPrimitive?.content)
+    }
+
+    @Test
     fun deepSeekChatBodyUsesThinkingObject() {
         val body = parseObject(
             client.buildOpenAiChatRequestBody(
@@ -109,6 +123,25 @@ class LLMClientTest {
 
         assertEquals("high", body["reasoning_effort"]?.jsonPrimitive?.content)
         assertEquals("enabled", body["thinking"]?.jsonObject?.get("type")?.jsonPrimitive?.content)
+    }
+
+    @Test
+    fun openAiChatCanRequestStreaming() {
+        val body = parseObject(
+            client.buildOpenAiChatRequestBody(
+                modelName = "gpt-5.3-codex-spark",
+                systemPrompt = "system",
+                userPrompt = "user",
+                responseFormat = json.parseToJsonElement("""{"type":"json_object"}""").jsonObject,
+                thinkingBudget = 0,
+                thinkingLevel = "",
+                providerType = "openai",
+                stream = true
+            )
+        )
+
+        assertEquals("true", body["stream"]?.jsonPrimitive?.content)
+        assertEquals("none", body["reasoning_effort"]?.jsonPrimitive?.content)
     }
 
     @Test

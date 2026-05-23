@@ -65,6 +65,7 @@ import com.typefree.ime.data.ProviderCapabilities
 import com.typefree.ime.data.ProviderConfig
 import com.typefree.ime.data.UserPinyinEntry
 import com.typefree.ime.service.LLMClient
+import com.typefree.ime.service.ModelTestResult
 import com.typefree.ime.service.ProviderDetectionResult
 import com.typefree.ime.ui.TypeFreeMaterialTheme
 import kotlinx.coroutines.launch
@@ -79,6 +80,7 @@ class SettingsActivity : ComponentActivity() {
     private var mappingDialog by mutableStateOf<MappingDialogState?>(null)
     private var choiceDialog by mutableStateOf<ChoiceDialogState?>(null)
     private var showAddProviderDialog by mutableStateOf(false)
+    private var showDebounceDialog by mutableStateOf(false)
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -100,6 +102,7 @@ class SettingsActivity : ComponentActivity() {
                     mappingDialog = mappingDialog,
                     choiceDialog = choiceDialog,
                     showAddProviderDialog = showAddProviderDialog,
+                    showDebounceDialog = showDebounceDialog,
                     onBack = { navigateBack() },
                     onTogglePinyinAi = {
                         preferenceManager.setPinyinLlmEnabled(it)
@@ -113,6 +116,9 @@ class SettingsActivity : ComponentActivity() {
                         preferenceManager.setVoiceInputEnabled(it)
                         refreshSnapshot()
                     },
+                    onOpenDebounceSetting = { showDebounceDialog = true },
+                    onSaveDebounceMs = { saveAiCandidateDebounceMs(it) },
+                    onDismissDebounce = { showDebounceDialog = false },
                     onOpenMapping = { mappingDialog = it },
                     onSaveMapping = { target, providerId, modelName -> saveMapping(target, providerId, modelName) },
                     onDismissMapping = { mappingDialog = null },
@@ -144,6 +150,7 @@ class SettingsActivity : ComponentActivity() {
                     onSaveProvider = { saveProvider(it) },
                     onDeleteProvider = { deleteProvider(it) },
                     onDetectProvider = { provider, onResult -> detectProvider(provider, onResult) },
+                    onTestModel = { provider, modelName, onResult -> testModel(provider, modelName, onResult) },
                     onAddDictionaryEntry = { pinyin, word -> addDictionaryEntry(pinyin, word) },
                     onDeleteDictionaryEntry = { entry -> deleteDictionaryEntry(entry) },
                     onImportDictionary = { uri -> importDictionary(uri) },
@@ -161,6 +168,7 @@ class SettingsActivity : ComponentActivity() {
             userPinyinEntries = preferenceManager.getUserPinyinEntries(),
             pinyinLlmEnabled = preferenceManager.isPinyinLlmEnabled(),
             contextPredictionEnabled = preferenceManager.isContextPredictionEnabled(),
+            aiCandidateDebounceMs = preferenceManager.getAiCandidateDebounceMs(),
             voiceInputEnabled = preferenceManager.isVoiceInputEnabled(),
             aiRequestLogCount = preferenceManager.getAiRequestLogs().size,
             pinyinProviderId = preferenceManager.getPinyinProviderId(),
@@ -227,6 +235,12 @@ class SettingsActivity : ComponentActivity() {
         refreshSnapshot()
     }
 
+    private fun saveAiCandidateDebounceMs(value: Int) {
+        preferenceManager.setAiCandidateDebounceMs(value)
+        showDebounceDialog = false
+        refreshSnapshot()
+    }
+
     private fun addProvider(provider: ProviderConfig) {
         preferenceManager.saveProviders(preferenceManager.getProviders() + provider)
         showAddProviderDialog = false
@@ -273,6 +287,19 @@ class SettingsActivity : ComponentActivity() {
             val result = LLMClient().detectProvider(provider)
             Toast.makeText(this@SettingsActivity, result.message, Toast.LENGTH_LONG).show()
             onResult(result)
+        }
+    }
+
+    private fun testModel(
+        provider: ProviderConfig,
+        modelName: String,
+        onResult: (ModelTestResult) -> Unit
+    ) {
+        lifecycleScope.launch {
+            val result = LLMClient(preferenceManager).testTextModel(provider, modelName)
+            Toast.makeText(this@SettingsActivity, result.message, Toast.LENGTH_LONG).show()
+            onResult(result)
+            refreshSnapshot()
         }
     }
 
@@ -359,6 +386,7 @@ private data class SettingsSnapshot(
     val userPinyinEntries: List<UserPinyinEntry> = emptyList(),
     val pinyinLlmEnabled: Boolean = true,
     val contextPredictionEnabled: Boolean = true,
+    val aiCandidateDebounceMs: Int = 300,
     val voiceInputEnabled: Boolean = false,
     val aiRequestLogCount: Int = 0,
     val pinyinProviderId: String = "openai",
@@ -418,10 +446,14 @@ private fun SettingsApp(
     mappingDialog: MappingDialogState?,
     choiceDialog: ChoiceDialogState?,
     showAddProviderDialog: Boolean,
+    showDebounceDialog: Boolean,
     onBack: () -> Unit,
     onTogglePinyinAi: (Boolean) -> Unit,
     onToggleContextPrediction: (Boolean) -> Unit,
     onToggleVoiceInput: (Boolean) -> Unit,
+    onOpenDebounceSetting: () -> Unit,
+    onSaveDebounceMs: (Int) -> Unit,
+    onDismissDebounce: () -> Unit,
     onOpenMapping: (MappingDialogState) -> Unit,
     onSaveMapping: (BindingTarget, String, String) -> Unit,
     onDismissMapping: () -> Unit,
@@ -438,6 +470,7 @@ private fun SettingsApp(
     onSaveProvider: (ProviderConfig) -> Unit,
     onDeleteProvider: (String) -> Unit,
     onDetectProvider: (ProviderConfig, (ProviderDetectionResult) -> Unit) -> Unit,
+    onTestModel: (ProviderConfig, String, (ModelTestResult) -> Unit) -> Unit,
     onAddDictionaryEntry: (String, String) -> Unit,
     onDeleteDictionaryEntry: (UserPinyinEntry) -> Unit,
     onImportDictionary: (Uri) -> Unit,
@@ -487,6 +520,7 @@ private fun SettingsApp(
                 onTogglePinyinAi = onTogglePinyinAi,
                 onToggleContextPrediction = onToggleContextPrediction,
                 onToggleVoiceInput = onToggleVoiceInput,
+                onOpenDebounceSetting = onOpenDebounceSetting,
                 onOpenMapping = onOpenMapping,
                 onOpenChoice = onOpenChoice,
                 onOpenProviders = onOpenProviders,
@@ -512,7 +546,8 @@ private fun SettingsApp(
                 provider = snapshot.providers.firstOrNull { it.id == selectedProviderId },
                 onSaveProvider = onSaveProvider,
                 onDeleteProvider = onDeleteProvider,
-                onDetectProvider = onDetectProvider
+                onDetectProvider = onDetectProvider,
+                onTestModel = onTestModel
             )
             Screen.LOCAL_DICTIONARY -> LocalDictionaryScreen(
                 modifier = Modifier.padding(padding),
@@ -552,6 +587,14 @@ private fun SettingsApp(
             onAdd = onAddProvider
         )
     }
+
+    if (showDebounceDialog) {
+        DebounceDialog(
+            currentMs = snapshot.aiCandidateDebounceMs,
+            onDismiss = onDismissDebounce,
+            onSave = onSaveDebounceMs
+        )
+    }
 }
 
 @Composable
@@ -561,6 +604,7 @@ private fun SettingsMainScreen(
     onTogglePinyinAi: (Boolean) -> Unit,
     onToggleContextPrediction: (Boolean) -> Unit,
     onToggleVoiceInput: (Boolean) -> Unit,
+    onOpenDebounceSetting: () -> Unit,
     onOpenMapping: (MappingDialogState) -> Unit,
     onOpenChoice: (ChoiceDialogState) -> Unit,
     onOpenProviders: () -> Unit,
@@ -604,6 +648,12 @@ private fun SettingsMainScreen(
             checked = snapshot.contextPredictionEnabled,
             onCheckedChange = onToggleContextPrediction
         )
+        ClickSettingRow(
+            title = "AI 候选等待",
+            summary = "输入停顿 ${debounceSummary(snapshot.aiCandidateDebounceMs)} 后请求模型；0 表示不等待。"
+        ) {
+            onOpenDebounceSetting()
+        }
 
         SectionTitle("模型功能绑定")
         ClickSettingRow(
@@ -881,7 +931,8 @@ private fun ProviderDetailScreen(
     provider: ProviderConfig?,
     onSaveProvider: (ProviderConfig) -> Unit,
     onDeleteProvider: (String) -> Unit,
-    onDetectProvider: (ProviderConfig, (ProviderDetectionResult) -> Unit) -> Unit
+    onDetectProvider: (ProviderConfig, (ProviderDetectionResult) -> Unit) -> Unit,
+    onTestModel: (ProviderConfig, String, (ModelTestResult) -> Unit) -> Unit
 ) {
     if (provider == null) {
         Column(
@@ -906,6 +957,8 @@ private fun ProviderDetailScreen(
     var showDeleteDialog by remember(provider.id) { mutableStateOf(false) }
     var editingModel by remember(provider.id) { mutableStateOf<String?>(null) }
     var detectedModelsDialog by remember(provider.id) { mutableStateOf<ProviderDetectionResult?>(null) }
+    var testingModel by remember(provider.id) { mutableStateOf<String?>(null) }
+    var modelTestResult by remember(provider.id) { mutableStateOf<Pair<String, ModelTestResult>?>(null) }
     val context = LocalContext.current
 
     fun buildProvider(): ProviderConfig {
@@ -1042,6 +1095,41 @@ private fun ProviderDetailScreen(
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
+                        modelTestResult
+                            ?.takeIf { it.first == model }
+                            ?.let { (_, result) ->
+                                Text(
+                                    text = result.message,
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = if (result.success) {
+                                        MaterialTheme.colorScheme.primary
+                                    } else {
+                                        MaterialTheme.colorScheme.error
+                                    }
+                                )
+                            }
+                    }
+                    if (capabilities.supportsStructuredOutput || capabilities.supportsToolCalling) {
+                        TextButton(
+                            onClick = {
+                                testingModel = model
+                                modelTestResult = null
+                                onTestModel(buildProvider(), model) { result ->
+                                    testingModel = null
+                                    modelTestResult = model to result
+                                }
+                            },
+                            enabled = testingModel == null && enabled && baseUrl.isNotBlank()
+                        ) {
+                            if (testingModel == model) {
+                                CircularProgressIndicator(
+                                    modifier = Modifier.size(18.dp),
+                                    strokeWidth = 2.dp
+                                )
+                            } else {
+                                Text("测试")
+                            }
+                        }
                     }
                     TextButton(onClick = { editingModel = model }) {
                         Text("设置")
@@ -1690,6 +1778,55 @@ private fun TextInputDialog(
     )
 }
 
+@Composable
+private fun DebounceDialog(
+    currentMs: Int,
+    onDismiss: () -> Unit,
+    onSave: (Int) -> Unit
+) {
+    var value by remember(currentMs) {
+        mutableStateOf(if (currentMs == 0) "0" else String.format(Locale.US, "%.1f", currentMs / 1000.0))
+    }
+    val parsedMs = (value.toDoubleOrNull()?.let { (it * 1000).toInt() } ?: -1)
+        .coerceAtMost(5000)
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("AI 候选等待") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                OutlinedTextField(
+                    value = value,
+                    onValueChange = { input ->
+                        value = input.filter { it.isDigit() || it == '.' }.take(5)
+                    },
+                    label = { Text("秒，0 表示不等待") },
+                    singleLine = true,
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal)
+                )
+                Text(
+                    text = "默认 0.3 秒；最大 5 秒。输入期间会取消上一次等待，停顿达到这里的时间后才请求模型。",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+        },
+        confirmButton = {
+            TextButton(
+                onClick = { onSave(parsedMs.coerceAtLeast(0)) },
+                enabled = parsedMs >= 0
+            ) {
+                Text("保存")
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) {
+                Text("取消")
+            }
+        }
+    )
+}
+
 private fun bindingSummary(snapshot: SettingsSnapshot, providerId: String, modelName: String): String {
     val provider = snapshot.providers.find { it.id == providerId }
     val providerName = provider?.name ?: providerId
@@ -1753,6 +1890,14 @@ private fun modelSettingsSummary(settings: ModelSettings?): String {
     }
 }
 
+private fun debounceSummary(ms: Int): String {
+    return if (ms <= 0) {
+        "0 秒"
+    } else {
+        String.format(Locale.US, "%.1f 秒", ms / 1000.0)
+    }
+}
+
 private fun thinkingLevelOptions(model: String): List<Pair<String, String>> {
     val normalized = normalizedModelName(model)
     return when {
@@ -1761,13 +1906,19 @@ private fun thinkingLevelOptions(model: String): List<Pair<String, String>> {
             "high" to "High",
             "max" to "Max"
         )
-        normalized.startsWith("gpt5") || normalized.startsWith("gpt-5") -> listOf(
-            "" to "关闭",
-            "minimal" to "Minimal",
-            "low" to "Low",
-            "medium" to "Medium",
-            "high" to "High"
-        )
+        normalized.startsWith("gpt5") || normalized.startsWith("gpt-5") -> {
+            val baseLevels = mutableListOf(
+                "" to "关闭",
+                "minimal" to "Minimal",
+                "low" to "Low",
+                "medium" to "Medium",
+                "high" to "High"
+            )
+            if ((gpt5MinorVersion(model) ?: 0) >= 3) {
+                baseLevels.add("xhigh" to "XHigh")
+            }
+            baseLevels
+        }
         normalized.startsWith("gemini3") || normalized.startsWith("gemini-3") -> listOf(
             "" to "关闭",
             "low" to "Low",
@@ -1783,6 +1934,15 @@ private fun thinkingLevelLabel(level: String): String {
 
 private fun normalizedModelName(model: String): String {
     return model.lowercase(Locale.US).replace(".", "").replace("_", "-")
+}
+
+private fun gpt5MinorVersion(model: String): Int? {
+    return Regex("""gpt[-_]?5(?:[.-]?(\d+))?""")
+        .find(model.lowercase(Locale.US))
+        ?.groupValues
+        ?.getOrNull(1)
+        ?.takeIf { it.isNotBlank() }
+        ?.toIntOrNull()
 }
 
 private fun languageLabel(value: String): String {

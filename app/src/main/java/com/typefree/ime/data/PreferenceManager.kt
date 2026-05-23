@@ -45,6 +45,22 @@ data class UserPinyinEntry(
 )
 
 @Serializable
+data class LocalUsageStats(
+    val keyPressCount: Long = 0,
+    val inputCharCount: Long = 0,
+    val llmPromptTokens: Long = 0,
+    val llmCompletionTokens: Long = 0,
+    val llmTotalTokens: Long = 0
+)
+
+@Serializable
+data class LlmTokenUsage(
+    val promptTokens: Int = 0,
+    val completionTokens: Int = 0,
+    val totalTokens: Int = 0
+)
+
+@Serializable
 data class AiRequestLog(
     val timestampMs: Long,
     val feature: String,
@@ -55,7 +71,10 @@ data class AiRequestLog(
     val userPrompt: String,
     val rawResponse: String?,
     val parsedOutput: List<String> = emptyList(),
-    val error: String? = null
+    val error: String? = null,
+    val promptTokens: Int = 0,
+    val completionTokens: Int = 0,
+    val totalTokens: Int = 0
 )
 
 class PreferenceManager(context: Context) {
@@ -94,10 +113,13 @@ class PreferenceManager(context: Context) {
         private const val KEY_ASR_LANGUAGE = "asr_language"
         private const val KEY_CONTEXT_PREDICTION_ENABLED = "context_prediction_enabled"
         private const val KEY_PINYIN_LLM_ENABLED = "pinyin_llm_enabled"
+        private const val KEY_AI_CANDIDATE_DEBOUNCE_MS = "ai_candidate_debounce_ms"
         private const val KEY_VOICE_INPUT_ENABLED = "voice_input_enabled"
         private const val KEY_USER_PINYIN_DICT = "user_pinyin_dict_v1"
         private const val KEY_AI_REQUEST_LOGS = "ai_request_logs_v1"
         private const val KEY_EMOJI_RECENT_COUNTS = "emoji_recent_counts_v1"
+        private const val KEY_LOCAL_USAGE_STATS = "local_usage_stats_v1"
+        private const val KEY_WORD_FREQUENCIES = "word_frequencies_v1"
 
         val DEFAULT_PROVIDERS = listOf(
             ProviderConfig(
@@ -355,6 +377,17 @@ class PreferenceManager(context: Context) {
         plainPrefs.edit().putBoolean(KEY_PINYIN_LLM_ENABLED, enabled).apply()
     }
 
+    fun getAiCandidateDebounceMs(): Int {
+        return plainPrefs.getInt(KEY_AI_CANDIDATE_DEBOUNCE_MS, DEFAULT_AI_CANDIDATE_DEBOUNCE_MS)
+            .coerceIn(0, MAX_AI_CANDIDATE_DEBOUNCE_MS)
+    }
+
+    fun setAiCandidateDebounceMs(value: Int) {
+        plainPrefs.edit()
+            .putInt(KEY_AI_CANDIDATE_DEBOUNCE_MS, value.coerceIn(0, MAX_AI_CANDIDATE_DEBOUNCE_MS))
+            .apply()
+    }
+
     fun isVoiceInputEnabled(): Boolean {
         return plainPrefs.getBoolean(KEY_VOICE_INPUT_ENABLED, false)
     }
@@ -388,6 +421,75 @@ class PreferenceManager(context: Context) {
             .joinToString("\n") { log ->
                 json.encodeToString(log)
             }
+    }
+
+    fun getLocalUsageStats(): LocalUsageStats {
+        val stored = plainPrefs.getString(KEY_LOCAL_USAGE_STATS, null) ?: return LocalUsageStats()
+        return try {
+            json.decodeFromString<LocalUsageStats>(stored)
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to decode local usage stats", e)
+            LocalUsageStats()
+        }
+    }
+
+    fun recordKeyPress(count: Long = 1) {
+        if (count <= 0) return
+        val current = getLocalUsageStats()
+        saveLocalUsageStats(current.copy(keyPressCount = current.keyPressCount + count))
+    }
+
+    fun recordCommittedText(text: String) {
+        val charCount = text.codePointCount(0, text.length).toLong()
+        if (charCount <= 0) return
+        val current = getLocalUsageStats()
+        saveLocalUsageStats(current.copy(inputCharCount = current.inputCharCount + charCount))
+    }
+
+    fun recordLlmTokenUsage(usage: LlmTokenUsage?) {
+        if (usage == null) return
+        val current = getLocalUsageStats()
+        saveLocalUsageStats(
+            current.copy(
+                llmPromptTokens = current.llmPromptTokens + usage.promptTokens,
+                llmCompletionTokens = current.llmCompletionTokens + usage.completionTokens,
+                llmTotalTokens = current.llmTotalTokens + usage.totalTokens
+            )
+        )
+    }
+
+    fun clearLocalUsageStats() {
+        plainPrefs.edit().remove(KEY_LOCAL_USAGE_STATS).apply()
+    }
+
+    private fun saveLocalUsageStats(stats: LocalUsageStats) {
+        plainPrefs.edit().putString(KEY_LOCAL_USAGE_STATS, json.encodeToString(stats)).apply()
+    }
+
+    fun getWordFrequencies(): Map<String, Int> {
+        val stored = plainPrefs.getString(KEY_WORD_FREQUENCIES, null) ?: return emptyMap()
+        return try {
+            json.decodeFromString<Map<String, Int>>(stored)
+                .filterValues { it > 0 }
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to decode word frequencies", e)
+            emptyMap()
+        }
+    }
+
+    fun recordWordUse(pinyin: String, word: String) {
+        val normalizedWord = word.trim()
+        if (normalizedWord.isBlank()) return
+
+        val frequencies = getWordFrequencies().toMutableMap()
+        wordFrequencyKeys(pinyin, normalizedWord).forEach { key ->
+            frequencies[key] = (frequencies[key] ?: 0) + 1
+        }
+        val trimmed = frequencies.entries
+            .sortedByDescending { it.value }
+            .take(MAX_WORD_FREQUENCIES)
+            .associate { it.key to it.value }
+        plainPrefs.edit().putString(KEY_WORD_FREQUENCIES, json.encodeToString(trimmed)).apply()
     }
 
     fun getEmojiRecentCounts(): Map<String, Int> {
@@ -483,6 +585,26 @@ class PreferenceManager(context: Context) {
         return UserPinyinEntry(normalizedPinyin, normalizedWord)
     }
 
+    private fun wordFrequencyKeys(pinyin: String, word: String): List<String> {
+        val normalizedPinyin = pinyin.lowercase()
+            .replace("'", "")
+            .replace(" ", "")
+            .trim()
+        val keys = mutableListOf(globalWordFrequencyKey(word))
+        if (normalizedPinyin.isNotBlank() && normalizedPinyin.all { it in 'a'..'z' }) {
+            keys.add(exactWordFrequencyKey(normalizedPinyin, word))
+        }
+        return keys
+    }
+
+    private fun exactWordFrequencyKey(pinyin: String, word: String): String {
+        return "$pinyin\u0000$word"
+    }
+
+    private fun globalWordFrequencyKey(word: String): String {
+        return "\u0000$word"
+    }
+
     private fun parseUserPinyinCsv(text: String): List<UserPinyinEntry> {
         return text.lineSequence()
             .map { it.trim() }
@@ -548,4 +670,7 @@ class PreferenceManager(context: Context) {
 
     private val MAX_AI_REQUEST_LOGS = 500
     private val MAX_RECENT_EMOJI = 120
+    private val MAX_WORD_FREQUENCIES = 2000
+    private val DEFAULT_AI_CANDIDATE_DEBOUNCE_MS = 300
+    private val MAX_AI_CANDIDATE_DEBOUNCE_MS = 5000
 }

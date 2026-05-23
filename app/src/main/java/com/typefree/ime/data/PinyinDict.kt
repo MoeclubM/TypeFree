@@ -4,6 +4,7 @@ import android.content.Context
 
 class PinyinDict {
     private val dict = HashMap<String, MutableList<String>>()
+    private var wordFrequencies: Map<String, Int> = emptyMap()
     private var sortedKeys: List<String> = emptyList()
     private var maxKeyLength: Int = 1
     private var initialIndex: Map<String, List<String>> = emptyMap()
@@ -16,10 +17,12 @@ class PinyinDict {
     }
 
     constructor(context: Context, preferenceManager: PreferenceManager) {
+        wordFrequencies = preferenceManager.getWordFrequencies()
         loadUserDict(preferenceManager.getUserPinyinEntries())
     }
 
-    internal constructor(entries: Map<String, List<String>>) {
+    internal constructor(entries: Map<String, List<String>>, wordFrequencies: Map<String, Int> = emptyMap()) {
+        this.wordFrequencies = wordFrequencies.filterValues { it > 0 }
         entries.forEach { (pinyin, words) ->
             val normalized = pinyin.trim().lowercase()
             if (normalized.isNotEmpty()) {
@@ -52,11 +55,53 @@ class PinyinDict {
         segmentCache.clear()
     }
 
+    fun recordWordUse(pinyin: String, word: String) {
+        val normalizedWord = word.trim()
+        if (normalizedWord.isBlank()) return
+        val updated = wordFrequencies.toMutableMap()
+        wordFrequencyKeys(normalizePinyin(pinyin), normalizedWord).forEach { key ->
+            updated[key] = (updated[key] ?: 0) + 1
+        }
+        wordFrequencies = updated
+        candidateCache.clear()
+    }
+
+    fun containsEntry(pinyin: String, word: String): Boolean {
+        val normalizedPinyin = normalizePinyin(pinyin)
+        val normalizedWord = word.trim()
+        if (normalizedPinyin.isBlank() || normalizedWord.isBlank()) return false
+        return dict[normalizedPinyin]?.contains(normalizedWord) == true
+    }
+
+    fun containsWord(word: String): Boolean {
+        val normalizedWord = word.trim()
+        if (normalizedWord.isBlank()) return false
+        return dict.values.any { words -> normalizedWord in words }
+    }
+
+    fun entriesForWords(words: Set<String>): List<UserPinyinEntry> {
+        if (words.isEmpty()) return emptyList()
+        return dict.flatMap { (pinyin, entries) ->
+            entries.mapNotNull { word ->
+                if (word in words) UserPinyinEntry(pinyin, word) else null
+            }
+        }.distinctBy { "${it.pinyin}\u0000${it.word}" }
+    }
+
+    fun missingSingleCharacterEntries(sourcePinyin: String, selectedText: String): List<UserPinyinEntry> {
+        val syllables = splitPinyinSyllables(normalizePinyin(sourcePinyin))
+        val chars = selectedText.codePointStrings().filter { it.isLikelyCjkCharacter() }
+        if (syllables.isEmpty() || syllables.size != chars.size) return emptyList()
+
+        return chars.zip(syllables)
+            .mapNotNull { (char, pinyin) ->
+                if (containsEntry(pinyin, char)) null else UserPinyinEntry(pinyin, char)
+            }
+            .distinctBy { "${it.pinyin}\u0000${it.word}" }
+    }
+
     private fun addEntry(pinyin: String, word: String, prepend: Boolean) {
-        val normalizedPinyin = pinyin.lowercase()
-            .replace("'", "")
-            .replace(" ", "")
-            .trim()
+        val normalizedPinyin = normalizePinyin(pinyin)
         val normalizedWord = word.trim()
         if (normalizedPinyin.isBlank() || normalizedWord.isBlank()) return
 
@@ -70,7 +115,7 @@ class PinyinDict {
     }
 
     fun getCandidates(pinyin: String): List<String> {
-        val clean = pinyin.lowercase().replace("'", "").replace(" ", "")
+        val clean = normalizePinyin(pinyin)
         if (clean.isEmpty()) return emptyList()
 
         // Check cache first
@@ -86,12 +131,14 @@ class PinyinDict {
 
         val direct = dict[clean]
         if (direct != null && direct.isNotEmpty()) {
-            candidates.addAll(direct.distinct())
+            candidates.addAll(rankWordsForPinyin(clean, direct.distinct()))
         }
 
         val splits = segmentPinyin(clean)
         if (splits.isNotEmpty()) {
-            val partCandidates = splits.map { dict[it] ?: emptyList() }
+            val partCandidates = splits.map { segment ->
+                rankWordsForPinyin(segment, dict[segment] ?: emptyList())
+            }
             if (partCandidates.all { it.isNotEmpty() }) {
                 if (splits.size > MAX_COMPOSED_SEGMENTS) {
                     val sentence = partCandidates.joinToString("") { it.first() }
@@ -123,11 +170,12 @@ class PinyinDict {
         if (clean.length == 1) {
             val matches = sortedKeys.filter { it.startsWith(clean) && it.length > 1 }
                 .flatMap { dict[it] ?: emptyList() }
+                .let { rankWordsForPinyin(clean, it) }
                 .take(10)
             candidates.addAll(matches)
         }
 
-        return candidates.distinct().take(MAX_CANDIDATES)
+        return rankWordsForPinyin(clean, candidates.distinct()).take(MAX_CANDIDATES)
     }
 
     private fun prefixCompletionCandidates(input: String): List<String> {
@@ -161,11 +209,14 @@ class PinyinDict {
             .take(PREFIX_KEY_LIMIT)
             .flatMap { dict[it].orEmpty().asSequence().take(PART_CANDIDATE_LIMIT) }
             .toList()
+            .let { rankWordsForPinyin(prefix, it) }
 
         if (prefixWords.isEmpty()) return emptyList()
         if (exactSegments.isEmpty()) return prefixWords.take(PREFIX_WORD_LIMIT)
 
-        val exactCandidates = exactSegments.map { dict[it].orEmpty().take(PART_CANDIDATE_LIMIT) }
+        val exactCandidates = exactSegments.map {
+            rankWordsForPinyin(it, dict[it].orEmpty()).take(PART_CANDIDATE_LIMIT)
+        }
         if (exactCandidates.any { it.isEmpty() }) return emptyList()
 
         var composed = exactCandidates.first()
@@ -234,7 +285,7 @@ class PinyinDict {
     }
 
     private fun acronymCandidates(input: String): List<String> {
-        return initialIndex[input].orEmpty().take(ACRONYM_WORD_LIMIT)
+        return rankWordsForPinyin(input, initialIndex[input].orEmpty()).take(ACRONYM_WORD_LIMIT)
     }
 
     private fun pinyinInitialKeys(pinyin: String): Set<String> {
@@ -257,6 +308,69 @@ class PinyinDict {
             }
         }
         return setOf(short, full).filter { it.isNotBlank() }.toSet()
+    }
+
+    private fun rankWordsForPinyin(pinyin: String, words: List<String>): List<String> {
+        if (words.size <= 1 || wordFrequencies.isEmpty()) return words
+        return words.withIndex()
+            .sortedWith(
+                compareByDescending<IndexedValue<String>> {
+                    wordFrequency(normalizePinyin(pinyin), it.value)
+                }.thenBy { it.index }
+            )
+            .map { it.value }
+    }
+
+    private fun wordFrequency(pinyin: String, word: String): Int {
+        return maxOf(
+            wordFrequencies[exactWordFrequencyKey(pinyin, word)] ?: 0,
+            wordFrequencies[globalWordFrequencyKey(word)] ?: 0
+        )
+    }
+
+    private fun wordFrequencyKeys(pinyin: String, word: String): List<String> {
+        val keys = mutableListOf(globalWordFrequencyKey(word))
+        if (pinyin.isNotBlank()) {
+            keys.add(exactWordFrequencyKey(pinyin, word))
+        }
+        return keys
+    }
+
+    private fun exactWordFrequencyKey(pinyin: String, word: String): String {
+        return "$pinyin\u0000$word"
+    }
+
+    private fun globalWordFrequencyKey(word: String): String {
+        return "\u0000$word"
+    }
+
+    private fun normalizePinyin(pinyin: String): String {
+        return pinyin.lowercase()
+            .replace("'", "")
+            .replace(" ", "")
+            .trim()
+    }
+
+    private fun String.codePointStrings(): List<String> {
+        val values = mutableListOf<String>()
+        var index = 0
+        while (index < length) {
+            val codePoint = codePointAt(index)
+            values.add(String(Character.toChars(codePoint)))
+            index += Character.charCount(codePoint)
+        }
+        return values
+    }
+
+    private fun String.isLikelyCjkCharacter(): Boolean {
+        if (isEmpty()) return false
+        val codePoint = codePointAt(0)
+        return codePoint in 0x4E00..0x9FFF ||
+            codePoint in 0x3400..0x4DBF ||
+            codePoint in 0x20000..0x2A6DF ||
+            codePoint in 0x2A700..0x2B73F ||
+            codePoint in 0x2B740..0x2B81F ||
+            codePoint in 0x2B820..0x2CEAF
     }
 
     private fun splitPinyinSyllables(pinyin: String): List<String> {

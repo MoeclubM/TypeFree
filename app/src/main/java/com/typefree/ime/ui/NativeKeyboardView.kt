@@ -18,6 +18,7 @@ import android.view.View
 import android.widget.HorizontalScrollView
 import android.widget.ImageButton
 import android.widget.LinearLayout
+import android.widget.ScrollView
 import android.widget.TextView
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowInsetsCompat
@@ -292,10 +293,7 @@ class NativeKeyboardView(context: Context) : LinearLayout(context) {
                     candidateHost.addView(scrollView, LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.MATCH_PARENT))
                 }
             }
-            isComposing() -> {
-                if (state.candidates.isEmpty()) {
-                    return
-                }
+            isComposing() || state.candidates.isNotEmpty() -> {
                 val scrollView = HorizontalScrollView(context).apply {
                     isHorizontalScrollBarEnabled = false
                     overScrollMode = OVER_SCROLL_NEVER
@@ -327,13 +325,22 @@ class NativeKeyboardView(context: Context) : LinearLayout(context) {
         candidateHost.visibility = if (
             state.recordingState != RecordingState.IDLE ||
             emojiSearchMode ||
-            (composing && state.candidates.isNotEmpty())
+            composing ||
+            state.candidates.isNotEmpty()
         ) VISIBLE else GONE
     }
 
     private fun renderRows() {
         rowsHost.removeAllViews()
         keyTargets.clear()
+        cancelActivePointers()
+        if (layoutMode == KeyboardLayout.EMOJI && !emojiSearchMode) {
+            renderEmojiBrowserRows()
+            renderedKeyboardSignature = keyboardSignature()
+            return
+        }
+        rowsHost.isClickable = true
+        rowsHost.setOnTouchListener { _, event -> handleKeyboardTouch(event) }
         activeRows().forEach { row ->
             val rowView = LinearLayout(context).apply {
                 orientation = HORIZONTAL
@@ -359,14 +366,16 @@ class NativeKeyboardView(context: Context) : LinearLayout(context) {
         return TextView(context).apply {
             text = candidate.text
             textSize = 17f
-            setTextColor(colors.text)
+            setTextColor(if (candidate.isPlaceholder) colors.mutedText else colors.text)
             gravity = Gravity.CENTER
             setPadding(dp(12), 0, dp(12), 0)
             minWidth = dp(44)
             background = selectableBackground(Color.TRANSPARENT, dp(8), Color.TRANSPARENT)
-            setOnClickListener {
-                performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
-                callbacks?.onCandidateClick(candidate)
+            if (!candidate.isPlaceholder) {
+                setOnClickListener {
+                    performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
+                    callbacks?.onCandidateClick(candidate)
+                }
             }
         }.also {
             it.layoutParams = LayoutParams(LayoutParams.WRAP_CONTENT, LayoutParams.MATCH_PARENT)
@@ -402,6 +411,101 @@ class NativeKeyboardView(context: Context) : LinearLayout(context) {
             isFocusable = false
             includeFontPadding = false
             background = selectableBackground(keyColor(key), dp(8), colors.border)
+        }
+    }
+
+    private fun clickableKeyView(key: String): TextView {
+        return keyView(key).apply {
+            isClickable = true
+            setOnClickListener {
+                performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
+                handleKey(key)
+            }
+        }
+    }
+
+    private fun renderEmojiBrowserRows() {
+        rowsHost.setOnTouchListener(null)
+        rowsHost.isClickable = false
+        EMOJI_CATEGORY_ROWS.forEach { row ->
+            rowsHost.addView(clickableKeyRow(row))
+        }
+
+        val emojiGrid = LinearLayout(context).apply {
+            orientation = VERTICAL
+        }
+        emojiEntriesForCategory(emojiCategory)
+            .chunked(EMOJI_COLUMNS)
+            .forEach { row ->
+                val rowView = LinearLayout(context).apply {
+                    orientation = HORIZONTAL
+                    gravity = Gravity.CENTER
+                }
+                row.forEach { entry ->
+                    rowView.addView(
+                        emojiGridItem(entry),
+                        LayoutParams(0, dp(44), 1f).apply {
+                            leftMargin = dp(2)
+                            rightMargin = dp(2)
+                        }
+                    )
+                }
+                repeat(EMOJI_COLUMNS - row.size) {
+                    rowView.addView(
+                        View(context),
+                        LayoutParams(0, dp(44), 1f).apply {
+                            leftMargin = dp(2)
+                            rightMargin = dp(2)
+                        }
+                    )
+                }
+                emojiGrid.addView(rowView, LayoutParams(LayoutParams.MATCH_PARENT, dp(48)))
+            }
+
+        rowsHost.addView(
+            ScrollView(context).apply {
+                isVerticalScrollBarEnabled = false
+                overScrollMode = OVER_SCROLL_IF_CONTENT_SCROLLS
+                addView(emojiGrid, LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT))
+            },
+            LayoutParams(LayoutParams.MATCH_PARENT, dp(EMOJI_BROWSER_HEIGHT_DP)).apply {
+                topMargin = dp(1)
+                bottomMargin = dp(1)
+            }
+        )
+        rowsHost.addView(clickableKeyRow(listOf("abc", "?123", "emojiSearch", "space", "enter")))
+    }
+
+    private fun clickableKeyRow(keys: List<String>): View {
+        return LinearLayout(context).apply {
+            orientation = HORIZONTAL
+            gravity = Gravity.CENTER
+            keys.forEach { key ->
+                addView(clickableKeyView(key), LayoutParams(0, dp(44), keyWeight(key)).apply {
+                    leftMargin = dp(2)
+                    rightMargin = dp(2)
+                })
+            }
+        }.also {
+            it.layoutParams = LayoutParams(LayoutParams.MATCH_PARENT, dp(48)).apply {
+                topMargin = dp(1)
+                bottomMargin = dp(1)
+            }
+        }
+    }
+
+    private fun emojiGridItem(entry: EmojiEntry): View {
+        return TextView(context).apply {
+            text = entry.value
+            textSize = 24f
+            setTextColor(colors.text)
+            gravity = Gravity.CENTER
+            includeFontPadding = false
+            background = selectableBackground(colors.key, dp(8), colors.border)
+            setOnClickListener {
+                performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
+                callbacks?.onEmojiClick(entry.value)
+            }
         }
     }
 
@@ -669,7 +773,7 @@ class NativeKeyboardView(context: Context) : LinearLayout(context) {
                 listOf("?123", "lang", ",", "space", ".", "enter")
             )
             KeyboardLayout.SYMBOLS -> SYMBOL_PAGES[symbolsPage.coerceIn(0, SYMBOL_PAGES.lastIndex)]
-            KeyboardLayout.EMOJI -> if (emojiSearchMode) EMOJI_SEARCH_ROWS else emojiCategoryRows()
+            KeyboardLayout.EMOJI -> EMOJI_SEARCH_ROWS
         }
     }
 
@@ -718,10 +822,14 @@ class NativeKeyboardView(context: Context) : LinearLayout(context) {
                 "recording|${state.recordingState}|${state.recordingError}"
             }
             emojiSearchMode -> "emojiSearch|$emojiSearchQuery|${emojiSearchResults().joinToString("") { it.value }}"
-            isComposing() -> "pinyin|${state.pinyinBuffer}|${state.pinyinCursor}|${state.candidates.joinToString("|") { "${it.text}:${it.isAi}" }}"
-            !isComposing() || state.candidates.isEmpty() -> "empty|${state.isChinese}|${isComposing()}"
-            else -> state.candidates.joinToString("|") { "${it.text}:${it.isAi}" }
+            isComposing() -> "pinyin|${state.pinyinBuffer}|${state.pinyinCursor}|${candidateListSignature()}"
+            state.candidates.isNotEmpty() -> "context|${candidateListSignature()}"
+            else -> "empty|${state.isChinese}|${isComposing()}"
         }
+    }
+
+    private fun candidateListSignature(): String {
+        return state.candidates.joinToString("|") { "${it.text}:${it.isAi}:${it.isPlaceholder}" }
     }
 
     private fun pinyinSignature(): String {
@@ -756,17 +864,6 @@ class NativeKeyboardView(context: Context) : LinearLayout(context) {
 
     private fun previousPage(current: Int, size: Int): Int {
         return if (size <= 0) 0 else (current - 1 + size) % size
-    }
-
-    private fun emojiCategoryRows(): List<List<String>> {
-        val values = emojiEntriesForCategory(emojiCategory)
-            .take(EMOJI_PER_CATEGORY_VIEW)
-            .map { it.value }
-        val rows = values.chunked(EMOJI_COLUMNS).toMutableList()
-        while (rows.size < EMOJI_RESULT_ROWS) {
-            rows.add(emptyList())
-        }
-        return EMOJI_CATEGORY_ROWS + rows + listOf(listOf("abc", "?123", "emojiSearch", "space", "enter"))
     }
 
     private fun emojiEntriesForCategory(category: String): List<EmojiEntry> {
@@ -929,8 +1026,7 @@ class NativeKeyboardView(context: Context) : LinearLayout(context) {
         private const val BACKSPACE_REPEAT_START_MS = 350L
         private const val BACKSPACE_REPEAT_MS = 55L
         private const val EMOJI_COLUMNS = 8
-        private const val EMOJI_RESULT_ROWS = 3
-        private const val EMOJI_PER_CATEGORY_VIEW = EMOJI_COLUMNS * EMOJI_RESULT_ROWS
+        private const val EMOJI_BROWSER_HEIGHT_DP = 168
         private const val EMOJI_SEARCH_RESULT_LIMIT = 80
         private const val PINYIN_CURSOR = "|"
     }
