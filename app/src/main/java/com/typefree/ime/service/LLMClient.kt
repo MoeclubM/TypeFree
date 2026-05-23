@@ -127,7 +127,7 @@ class LLMClient {
 
     private suspend fun callOpenAiChat(provider: ProviderConfig, modelName: String, systemPrompt: String, userPrompt: String): String? = withContext(Dispatchers.IO) {
         val url = if (provider.baseUrl.endsWith("/chat/completions")) provider.baseUrl else "${provider.baseUrl.trimEnd('/')}/chat/completions"
-        val primaryBody = openAiChatRequestBody(
+        val primaryBody = buildOpenAiChatRequestBody(
             modelName = modelName,
             systemPrompt = systemPrompt,
             userPrompt = userPrompt,
@@ -139,7 +139,7 @@ class LLMClient {
             return@withContext primaryResult.text
         }
 
-        val fallbackBody = openAiChatRequestBody(
+        val fallbackBody = buildOpenAiChatRequestBody(
             modelName = modelName,
             systemPrompt = systemPrompt,
             userPrompt = userPrompt,
@@ -154,7 +154,7 @@ class LLMClient {
         val text: String?
     )
 
-    private fun openAiChatRequestBody(
+    internal fun buildOpenAiChatRequestBody(
         modelName: String,
         systemPrompt: String,
         userPrompt: String,
@@ -211,19 +211,7 @@ class LLMClient {
 
     private suspend fun callOpenAiResponses(provider: ProviderConfig, modelName: String, systemPrompt: String, userPrompt: String): String? = withContext(Dispatchers.IO) {
         val url = if (provider.baseUrl.endsWith("/responses")) provider.baseUrl else "${provider.baseUrl.trimEnd('/')}/responses"
-        val requestBodyJson = buildJsonObject {
-            put("model", modelName)
-            put("instructions", systemPrompt)
-            put("input", userPrompt)
-            putJsonObject("text") {
-                put("format", openAiResponsesJsonSchemaFormat())
-            }
-            provider.thinkingBudget.takeIf { it > 0 }?.let {
-                putJsonObject("reasoning") {
-                    put("effort", thinkingEffort(it))
-                }
-            }
-        }.toString()
+        val requestBodyJson = buildOpenAiResponsesRequestBody(modelName, systemPrompt, userPrompt, provider.thinkingBudget)
 
         val request = authorizedPostRequest(provider, url, requestBodyJson)
         client.newCall(request).execute().use { response ->
@@ -242,31 +230,30 @@ class LLMClient {
         }
     }
 
-    private suspend fun callAnthropic(provider: ProviderConfig, modelName: String, systemPrompt: String, userPrompt: String): String? = withContext(Dispatchers.IO) {
-        val url = if (provider.baseUrl.endsWith("/messages")) provider.baseUrl else "${provider.baseUrl.trimEnd('/')}/messages"
-        val maxTokens = maxOf(300, provider.thinkingBudget + 220)
-        val requestBodyJson = buildJsonObject {
+    internal fun buildOpenAiResponsesRequestBody(
+        modelName: String,
+        systemPrompt: String,
+        userPrompt: String,
+        thinkingBudget: Int
+    ): String {
+        return buildJsonObject {
             put("model", modelName)
-            put("system", systemPrompt)
-            put("max_tokens", maxTokens)
-            put("temperature", 0.3)
-            provider.thinkingBudget.takeIf { it > 0 }?.let {
-                putJsonObject("thinking") {
-                    put("type", "enabled")
-                    put("budget_tokens", it)
+            put("instructions", systemPrompt)
+            put("input", userPrompt)
+            putJsonObject("text") {
+                put("format", openAiResponsesJsonSchemaFormat())
+            }
+            thinkingBudget.takeIf { it > 0 }?.let {
+                putJsonObject("reasoning") {
+                    put("effort", thinkingEffort(it))
                 }
             }
-            putJsonArray("messages") {
-                addMessage("user", userPrompt)
-            }
-            putJsonArray("tools") {
-                add(anthropicCandidateTool())
-            }
-            putJsonObject("tool_choice") {
-                put("type", "tool")
-                put("name", CANDIDATE_TOOL_NAME)
-            }
         }.toString()
+    }
+
+    private suspend fun callAnthropic(provider: ProviderConfig, modelName: String, systemPrompt: String, userPrompt: String): String? = withContext(Dispatchers.IO) {
+        val url = if (provider.baseUrl.endsWith("/messages")) provider.baseUrl else "${provider.baseUrl.trimEnd('/')}/messages"
+        val requestBodyJson = buildAnthropicRequestBody(modelName, systemPrompt, userPrompt, provider.thinkingBudget)
         val body = requestBodyJson.toRequestBody(jsonMediaType)
 
         val request = Request.Builder()
@@ -307,36 +294,46 @@ class LLMClient {
         }
     }
 
-    private suspend fun callGemini(provider: ProviderConfig, modelName: String, systemPrompt: String, userPrompt: String): String? = withContext(Dispatchers.IO) {
-        val base = provider.baseUrl.trimEnd('/').ifBlank { "https://generativelanguage.googleapis.com/v1beta" }
-        val url = if (base.endsWith(":generateContent")) base else "$base/models/$modelName:generateContent"
-        val requestBodyJson = buildJsonObject {
-            putJsonObject("systemInstruction") {
-                putJsonArray("parts") {
-                    add(buildJsonObject { put("text", systemPrompt) })
+    internal fun buildAnthropicRequestBody(
+        modelName: String,
+        systemPrompt: String,
+        userPrompt: String,
+        thinkingBudget: Int
+    ): String {
+        val normalizedThinkingBudget = normalizedAnthropicThinkingBudget(thinkingBudget)
+        val maxTokens = maxOf(300, normalizedThinkingBudget + 220)
+        return buildJsonObject {
+            put("model", modelName)
+            put("system", systemPrompt)
+            put("max_tokens", maxTokens)
+            if (normalizedThinkingBudget == 0) {
+                put("temperature", 0.3)
+            }
+            normalizedThinkingBudget.takeIf { it > 0 }?.let {
+                putJsonObject("thinking") {
+                    put("type", "enabled")
+                    put("budget_tokens", it)
                 }
             }
-            putJsonArray("contents") {
-                add(
-                    buildJsonObject {
-                        put("role", "user")
-                        putJsonArray("parts") {
-                            add(buildJsonObject { put("text", userPrompt) })
-                        }
-                    }
-                )
+            putJsonArray("messages") {
+                addMessage("user", userPrompt)
             }
-            putJsonObject("generationConfig") {
-                put("temperature", 0.3)
-                put("responseMimeType", "application/json")
-                put("responseSchema", geminiCandidateSchema())
-                provider.thinkingBudget.takeIf { it > 0 }?.let {
-                    putJsonObject("thinkingConfig") {
-                        put("thinkingBudget", it)
-                    }
+            putJsonArray("tools") {
+                add(anthropicCandidateTool())
+            }
+            if (normalizedThinkingBudget == 0) {
+                putJsonObject("tool_choice") {
+                    put("type", "tool")
+                    put("name", CANDIDATE_TOOL_NAME)
                 }
             }
         }.toString()
+    }
+
+    private suspend fun callGemini(provider: ProviderConfig, modelName: String, systemPrompt: String, userPrompt: String): String? = withContext(Dispatchers.IO) {
+        val base = provider.baseUrl.trimEnd('/').ifBlank { "https://generativelanguage.googleapis.com/v1beta" }
+        val url = if (base.endsWith(":generateContent")) base else "$base/models/$modelName:generateContent"
+        val requestBodyJson = buildGeminiRequestBody(systemPrompt, userPrompt, provider.thinkingBudget)
 
         val requestBuilder = Request.Builder()
             .url(url)
@@ -372,6 +369,40 @@ class LLMClient {
                 null
             }
         }
+    }
+
+    internal fun buildGeminiRequestBody(
+        systemPrompt: String,
+        userPrompt: String,
+        thinkingBudget: Int
+    ): String {
+        return buildJsonObject {
+            putJsonObject("systemInstruction") {
+                putJsonArray("parts") {
+                    add(buildJsonObject { put("text", systemPrompt) })
+                }
+            }
+            putJsonArray("contents") {
+                add(
+                    buildJsonObject {
+                        put("role", "user")
+                        putJsonArray("parts") {
+                            add(buildJsonObject { put("text", userPrompt) })
+                        }
+                    }
+                )
+            }
+            putJsonObject("generationConfig") {
+                put("temperature", 0.3)
+                put("responseMimeType", "application/json")
+                put("responseJsonSchema", geminiCandidateJsonSchema())
+                thinkingBudget.takeIf { it > 0 }?.let {
+                    putJsonObject("thinkingConfig") {
+                        put("thinkingBudget", it)
+                    }
+                }
+            }
+        }.toString()
     }
 
     private fun authorizedPostRequest(provider: ProviderConfig, url: String, requestBodyJson: String): Request {
@@ -450,14 +481,14 @@ class LLMClient {
         }
     }
 
-    private fun geminiCandidateSchema(): JsonObject {
+    private fun geminiCandidateJsonSchema(): JsonObject {
         return buildJsonObject {
-            put("type", "OBJECT")
+            put("type", "object")
             putJsonObject("properties") {
                 putJsonObject("candidates") {
-                    put("type", "ARRAY")
+                    put("type", "array")
                     putJsonObject("items") {
-                        put("type", "STRING")
+                        put("type", "string")
                     }
                 }
             }
@@ -473,6 +504,10 @@ class LLMClient {
             budget <= 4096 -> "medium"
             else -> "high"
         }
+    }
+
+    private fun normalizedAnthropicThinkingBudget(budget: Int): Int {
+        return if (budget > 0) maxOf(1024, budget) else 0
     }
 
     private fun extractOpenAiResponseText(response: JsonObject): String? {
