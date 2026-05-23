@@ -8,6 +8,7 @@ import android.graphics.drawable.GradientDrawable
 import android.graphics.drawable.RippleDrawable
 import android.os.Handler
 import android.os.Looper
+import android.text.TextUtils
 import android.view.Gravity
 import android.view.HapticFeedbackConstants
 import android.view.MotionEvent
@@ -42,6 +43,9 @@ class NativeKeyboardView(context: Context) : LinearLayout(context) {
     private var layoutMode = KeyboardLayout.ALPHA
     private var shiftActive = false
     private var state = State("", emptyList(), true, RecordingState.IDLE, "")
+    private var renderedToolbarSignature = ""
+    private var renderedCandidateSignature = ""
+    private var renderedPinyinSignature = ""
     private var renderedKeyboardSignature = ""
 
     private val repeatHandler = Handler(Looper.getMainLooper())
@@ -83,7 +87,9 @@ class NativeKeyboardView(context: Context) : LinearLayout(context) {
         pinyinText.typeface = Typeface.DEFAULT_BOLD
         pinyinText.gravity = Gravity.CENTER_VERTICAL
         pinyinText.setPadding(dp(10), 0, dp(10), 0)
-        pinyinText.visibility = GONE
+        pinyinText.isSingleLine = true
+        pinyinText.ellipsize = TextUtils.TruncateAt.START
+        pinyinText.visibility = INVISIBLE
         pinyinText.background = roundedBackground(Color.WHITE, dp(10), BORDER_COLOR)
         addView(
             pinyinText,
@@ -104,12 +110,26 @@ class NativeKeyboardView(context: Context) : LinearLayout(context) {
     }
 
     fun render(nextState: State) {
-        val oldKeyboardSignature = keyboardSignature()
         state = nextState
-        renderToolbar()
-        renderCandidateBar()
-        renderPinyinBuffer()
-        if (renderedKeyboardSignature != oldKeyboardSignature || renderedKeyboardSignature != keyboardSignature()) {
+        val toolbarSignature = toolbarSignature()
+        if (renderedToolbarSignature != toolbarSignature) {
+            renderToolbar()
+            renderedToolbarSignature = toolbarSignature
+        }
+
+        val candidateSignature = candidateSignature()
+        if (renderedCandidateSignature != candidateSignature) {
+            renderCandidateBar()
+            renderedCandidateSignature = candidateSignature
+        }
+
+        val pinyinSignature = pinyinSignature()
+        if (renderedPinyinSignature != pinyinSignature) {
+            renderPinyinBuffer()
+            renderedPinyinSignature = pinyinSignature
+        }
+
+        if (renderedKeyboardSignature != keyboardSignature()) {
             renderRows()
         }
     }
@@ -179,8 +199,8 @@ class NativeKeyboardView(context: Context) : LinearLayout(context) {
 
     private fun renderPinyinBuffer() {
         val visible = state.isChinese && state.pinyinBuffer.isNotEmpty()
-        pinyinText.visibility = if (visible) VISIBLE else GONE
-        pinyinText.text = state.pinyinBuffer
+        pinyinText.visibility = if (visible) VISIBLE else INVISIBLE
+        pinyinText.text = if (visible) state.pinyinBuffer else ""
     }
 
     private fun renderRows() {
@@ -230,7 +250,7 @@ class NativeKeyboardView(context: Context) : LinearLayout(context) {
             setTextColor(TEXT_COLOR)
             gravity = Gravity.CENTER
             isClickable = true
-            isFocusable = true
+            isFocusable = false
             includeFontPadding = false
             background = selectableBackground(keyColor(key), dp(8), BORDER_COLOR)
             if (key == "backspace") {
@@ -410,6 +430,24 @@ class NativeKeyboardView(context: Context) : LinearLayout(context) {
 
     private fun keyboardSignature(): String {
         return "${layoutMode.name}|$shiftActive|${state.isChinese}"
+    }
+
+    private fun toolbarSignature(): String {
+        return "${state.isChinese}|${state.recordingState}"
+    }
+
+    private fun candidateSignature(): String {
+        return when {
+            state.recordingState != RecordingState.IDLE -> {
+                "recording|${state.recordingState}|${state.recordingError}"
+            }
+            state.candidates.isEmpty() -> "empty|${state.isChinese}"
+            else -> state.candidates.joinToString("|") { "${it.text}:${it.isAi}" }
+        }
+    }
+
+    private fun pinyinSignature(): String {
+        return "${state.isChinese}|${state.pinyinBuffer}"
     }
 
     private fun selectableBackground(color: Int, radius: Int, strokeColor: Int): RippleDrawable {

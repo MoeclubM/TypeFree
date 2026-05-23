@@ -2,22 +2,29 @@ package com.typefree.ime.data
 
 import android.content.Context
 import android.util.Log
-import android.util.LruCache
 import java.io.BufferedReader
 import java.io.InputStreamReader
 
-class PinyinDict(private val context: Context) {
+class PinyinDict {
     private val dict = HashMap<String, MutableList<String>>()
 
-    // LRU caches to avoid recomputing segments and candidates on every keystroke
-    private val segmentCache = LruCache<String, List<String>>(SEGMENT_CACHE_SIZE)
-    private val candidateCache = LruCache<String, List<String>>(CANDIDATE_CACHE_SIZE)
+    private val segmentCache = SimpleLruCache<String, List<String>>(SEGMENT_CACHE_SIZE)
+    private val candidateCache = SimpleLruCache<String, List<String>>(CANDIDATE_CACHE_SIZE)
 
-    init {
-        loadDict()
+    constructor(context: Context) {
+        loadDict(context)
     }
 
-    private fun loadDict() {
+    internal constructor(entries: Map<String, List<String>>) {
+        entries.forEach { (pinyin, words) ->
+            val normalized = pinyin.trim().lowercase()
+            if (normalized.isNotEmpty()) {
+                dict[normalized] = words.map { it.trim() }.filter { it.isNotEmpty() }.toMutableList()
+            }
+        }
+    }
+
+    private fun loadDict(context: Context) {
         try {
             val assetManager = context.assets
             val inputStream = assetManager.open("pinyin.txt")
@@ -138,5 +145,21 @@ class PinyinDict(private val context: Context) {
         private const val MAX_COMPOSED_SEGMENTS = 6
         private const val MAX_COMPOSED_CANDIDATES = 32
         private const val MAX_CANDIDATES = 40
+    }
+}
+
+private class SimpleLruCache<K, V>(private val maxSize: Int) {
+    private val values = object : LinkedHashMap<K, V>(16, 0.75f, true) {
+        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<K, V>?): Boolean {
+            return size > maxSize
+        }
+    }
+
+    @Synchronized
+    fun get(key: K): V? = values[key]
+
+    @Synchronized
+    fun put(key: K, value: V) {
+        values[key] = value
     }
 }

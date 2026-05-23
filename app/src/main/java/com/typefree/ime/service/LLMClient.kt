@@ -71,7 +71,7 @@ class LLMClient {
                 else -> callOpenAiChat(provider, modelName, systemPrompt, userPrompt)
             }
         } catch (e: Exception) {
-            Log.e("LLMClient", "Error calling LLM for pinyin", e)
+            logError("Error calling LLM for pinyin", e)
             null
         }
 
@@ -97,7 +97,7 @@ class LLMClient {
                 else -> callOpenAiChat(provider, modelName, systemPrompt, userPrompt)
             }
         } catch (e: Exception) {
-            Log.e("LLMClient", "Error calling LLM for prediction", e)
+            logError("Error calling LLM for prediction", e)
             null
         }
 
@@ -120,7 +120,7 @@ class LLMClient {
                 else -> detectOpenAiCompatible(provider)
             }
         } catch (e: Exception) {
-            Log.e("LLMClient", "Provider detection failed", e)
+            logError("Provider detection failed", e)
             ProviderDetectionResult(provider.models, provider.capabilities, "Detection failed: ${e.message}")
         }
     }
@@ -135,7 +135,7 @@ class LLMClient {
             thinkingBudget = provider.thinkingBudget
         )
         val primaryResult = executeOpenAiChat(provider, url, primaryBody)
-        if (primaryResult.success || primaryResult.text != null) {
+        if (primaryResult.text != null) {
             return@withContext primaryResult.text
         }
 
@@ -190,7 +190,7 @@ class LLMClient {
         val request = requestBuilder.build()
         return client.newCall(request).execute().use { response ->
             if (!response.isSuccessful) {
-                Log.e("LLMClient", "OpenAI call failed: ${response.code} ${response.message}")
+                logError("OpenAI call failed: ${response.code} ${response.message}")
                 return LlmTextResult(false, null)
             }
             val responseBody = response.body?.string() ?: return LlmTextResult(true, null)
@@ -201,9 +201,9 @@ class LLMClient {
                 val choices = element.jsonObject["choices"]?.jsonArray
                 val firstChoice = choices?.getOrNull(0)?.jsonObject
                 val message = firstChoice?.get("message")?.jsonObject
-                LlmTextResult(true, message?.get("content")?.jsonPrimitive?.content)
+                LlmTextResult(true, message?.get("content")?.jsonPrimitive?.contentOrNull)
             } catch (e: Exception) {
-                Log.e("LLMClient", "Failed to parse OpenAI response body", e)
+                logError("Failed to parse OpenAI response body", e)
                 LlmTextResult(true, null)
             }
         }
@@ -228,7 +228,7 @@ class LLMClient {
         val request = authorizedPostRequest(provider, url, requestBodyJson)
         client.newCall(request).execute().use { response ->
             if (!response.isSuccessful) {
-                Log.e("LLMClient", "OpenAI Responses call failed: ${response.code} ${response.message}")
+                logError("OpenAI Responses call failed: ${response.code} ${response.message}")
                 return@withContext null
             }
             val responseBody = response.body?.string() ?: return@withContext null
@@ -236,7 +236,7 @@ class LLMClient {
                 val element = json.parseToJsonElement(responseBody)
                 extractOpenAiResponseText(element.jsonObject)
             } catch (e: Exception) {
-                Log.e("LLMClient", "Failed to parse OpenAI Responses body", e)
+                logError("Failed to parse OpenAI Responses body", e)
                 null
             }
         }
@@ -279,7 +279,7 @@ class LLMClient {
 
         client.newCall(request).execute().use { response ->
             if (!response.isSuccessful) {
-                Log.e("LLMClient", "Anthropic call failed: ${response.code} ${response.message}")
+                logError("Anthropic call failed: ${response.code} ${response.message}")
                 return@withContext null
             }
             val responseBody = response.body?.string() ?: return@withContext null
@@ -301,7 +301,7 @@ class LLMClient {
                     firstText?.get("text")?.jsonPrimitive?.content
                 }
             } catch (e: Exception) {
-                Log.e("LLMClient", "Failed to parse Anthropic response body", e)
+                logError("Failed to parse Anthropic response body", e)
                 null
             }
         }
@@ -348,7 +348,7 @@ class LLMClient {
 
         client.newCall(requestBuilder.build()).execute().use { response ->
             if (!response.isSuccessful) {
-                Log.e("LLMClient", "Gemini call failed: ${response.code} ${response.message}")
+                logError("Gemini call failed: ${response.code} ${response.message}")
                 return@withContext null
             }
             val responseBody = response.body?.string() ?: return@withContext null
@@ -368,7 +368,7 @@ class LLMClient {
                     ?.jsonPrimitive
                     ?.content
             } catch (e: Exception) {
-                Log.e("LLMClient", "Failed to parse Gemini response body", e)
+                logError("Failed to parse Gemini response body", e)
                 null
             }
         }
@@ -568,7 +568,7 @@ class LLMClient {
      * Safely parses JSON string representation of a List<String>.
      * Cleans markdown json blocks if returned by the LLM.
      */
-    private fun parseJsonList(rawText: String?): List<String> {
+    internal fun parseJsonList(rawText: String?): List<String> {
         if (rawText == null || rawText.trim().isEmpty()) return emptyList()
         
         var clean = rawText.trim()
@@ -602,7 +602,7 @@ class LLMClient {
                 }
             }
         } catch (e: Exception) {
-            Log.e("LLMClient", "JSON array parsing failed: $clean", e)
+            logError("JSON array parsing failed: $clean", e)
             
             // Fallback parsing: search for arrays using regex or split
             try {
@@ -626,6 +626,16 @@ class LLMClient {
         return clean.split(",")
             .map { it.replace("\"", "").replace("[", "").replace("]", "").trim() }
             .filter { it.isNotEmpty() }
+    }
+
+    private fun logError(message: String, throwable: Throwable? = null) {
+        runCatching {
+            if (throwable == null) {
+                Log.e("LLMClient", message)
+            } else {
+                Log.e("LLMClient", message, throwable)
+            }
+        }
     }
 
     companion object {
