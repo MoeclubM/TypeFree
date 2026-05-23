@@ -210,12 +210,14 @@ class LLMClient {
     private suspend fun callOpenAiChat(provider: ProviderConfig, modelName: String, systemPrompt: String, userPrompt: String): String? = withContext(Dispatchers.IO) {
         val url = if (provider.baseUrl.endsWith("/chat/completions")) provider.baseUrl else "${provider.baseUrl.trimEnd('/')}/chat/completions"
         val thinkingBudget = thinkingBudgetFor(provider, modelName)
+        val modelSettings = provider.modelSettings[modelName]
         val primaryBody = buildOpenAiChatRequestBody(
             modelName = modelName,
             systemPrompt = systemPrompt,
             userPrompt = userPrompt,
             responseFormat = openAiChatPrimaryResponseFormat(provider, modelName),
             thinkingBudget = thinkingBudget,
+            thinkingLevel = modelSettings?.thinkingLevel.orEmpty(),
             providerType = provider.type
         )
         val primaryResult = executeOpenAiChat(provider, url, primaryBody)
@@ -229,6 +231,7 @@ class LLMClient {
             userPrompt = userPrompt,
             responseFormat = openAiChatJsonObjectFormat(),
             thinkingBudget = 0,
+            thinkingLevel = modelSettings?.thinkingLevel.orEmpty(),
             providerType = provider.type
         )
         executeOpenAiChat(provider, url, fallbackBody).text
@@ -245,6 +248,7 @@ class LLMClient {
         userPrompt: String,
         responseFormat: JsonObject,
         thinkingBudget: Int,
+        thinkingLevel: String = "",
         providerType: String = "openai"
     ): String {
         return buildJsonObject {
@@ -255,19 +259,20 @@ class LLMClient {
             }
             put("temperature", 0.3)
             put("response_format", responseFormat)
-            putOpenAiChatThinking(modelName, providerType, thinkingBudget)
+            putOpenAiChatThinking(modelName, providerType, thinkingBudget, thinkingLevel)
         }.toString()
     }
 
-    private fun JsonObjectBuilder.putOpenAiChatThinking(modelName: String, providerType: String, thinkingBudget: Int) {
-        if (thinkingBudget <= 0) return
+    private fun JsonObjectBuilder.putOpenAiChatThinking(modelName: String, providerType: String, thinkingBudget: Int, configuredLevel: String) {
+        val thinkingLevel = thinkingLevelFor(modelName, configuredLevel, thinkingBudget)
+        if (thinkingBudget <= 0 && thinkingLevel.isBlank()) return
         if (isDeepSeekModel(modelName) || providerType == "deepseek") {
-            put("reasoning_effort", deepSeekReasoningEffort(thinkingBudget))
+            put("reasoning_effort", thinkingLevel.ifBlank { deepSeekReasoningEffort(thinkingBudget) })
             putJsonObject("thinking") {
                 put("type", "enabled")
             }
         } else if (isOpenAiReasoningModel(modelName)) {
-            put("reasoning_effort", openAiReasoningEffort(modelName, thinkingBudget))
+            put("reasoning_effort", thinkingLevel.ifBlank { openAiReasoningEffort(modelName, thinkingBudget) })
         }
     }
 
@@ -307,7 +312,14 @@ class LLMClient {
 
     private suspend fun callOpenAiResponses(provider: ProviderConfig, modelName: String, systemPrompt: String, userPrompt: String): String? = withContext(Dispatchers.IO) {
         val url = if (provider.baseUrl.endsWith("/responses")) provider.baseUrl else "${provider.baseUrl.trimEnd('/')}/responses"
-        val requestBodyJson = buildOpenAiResponsesRequestBody(modelName, systemPrompt, userPrompt, thinkingBudgetFor(provider, modelName))
+        val settings = provider.modelSettings[modelName]
+        val requestBodyJson = buildOpenAiResponsesRequestBody(
+            modelName,
+            systemPrompt,
+            userPrompt,
+            thinkingBudgetFor(provider, modelName),
+            settings?.thinkingLevel.orEmpty()
+        )
 
         val request = authorizedPostRequest(provider, url, requestBodyJson)
         client.newCall(request).execute().use { response ->
@@ -330,7 +342,8 @@ class LLMClient {
         modelName: String,
         systemPrompt: String,
         userPrompt: String,
-        thinkingBudget: Int
+        thinkingBudget: Int,
+        thinkingLevel: String = ""
     ): String {
         return buildJsonObject {
             put("model", modelName)
@@ -339,7 +352,7 @@ class LLMClient {
             putJsonObject("text") {
                 put("format", openAiResponsesJsonSchemaFormat())
             }
-            val effort = openAiResponsesReasoningEffort(modelName, thinkingBudget)
+            val effort = openAiResponsesReasoningEffort(modelName, thinkingBudget, thinkingLevel)
             if (effort != null) {
                 putJsonObject("reasoning") {
                     put("effort", effort)
@@ -430,7 +443,14 @@ class LLMClient {
     private suspend fun callGemini(provider: ProviderConfig, modelName: String, systemPrompt: String, userPrompt: String): String? = withContext(Dispatchers.IO) {
         val base = provider.baseUrl.trimEnd('/').ifBlank { "https://generativelanguage.googleapis.com/v1beta" }
         val url = if (base.endsWith(":generateContent")) base else "$base/models/$modelName:generateContent"
-        val requestBodyJson = buildGeminiRequestBody(modelName, systemPrompt, userPrompt, thinkingBudgetFor(provider, modelName))
+        val settings = provider.modelSettings[modelName]
+        val requestBodyJson = buildGeminiRequestBody(
+            modelName,
+            systemPrompt,
+            userPrompt,
+            thinkingBudgetFor(provider, modelName),
+            settings?.thinkingLevel.orEmpty()
+        )
 
         val requestBuilder = Request.Builder()
             .url(url)
@@ -472,7 +492,8 @@ class LLMClient {
         modelName: String,
         systemPrompt: String,
         userPrompt: String,
-        thinkingBudget: Int
+        thinkingBudget: Int,
+        thinkingLevel: String = ""
     ): String {
         return buildJsonObject {
             putJsonObject("systemInstruction") {
@@ -494,9 +515,10 @@ class LLMClient {
                 put("temperature", 0.3)
                 put("responseMimeType", "application/json")
                 put("responseJsonSchema", geminiCandidateJsonSchema())
-                if (isGeminiThinkingLevelModel(modelName) && thinkingBudget > 0) {
+                val level = thinkingLevelFor(modelName, thinkingLevel, thinkingBudget)
+                if (isGeminiThinkingLevelModel(modelName) && level.isNotBlank()) {
                     putJsonObject("thinkingConfig") {
-                        put("thinkingLevel", geminiThinkingLevel(thinkingBudget))
+                        put("thinkingLevel", level)
                     }
                 } else if (thinkingBudget > 0) {
                     putJsonObject("thinkingConfig") {
@@ -612,6 +634,18 @@ class LLMClient {
         return provider.modelSettings[modelName]?.thinkingBudget ?: provider.thinkingBudget
     }
 
+    private fun thinkingLevelFor(modelName: String, configuredLevel: String, fallbackBudget: Int): String {
+        val cleaned = configuredLevel.trim().lowercase(Locale.US)
+        if (cleaned.isNotBlank()) return cleaned
+        if (fallbackBudget <= 0) return ""
+        return when {
+            isDeepSeekModel(modelName) -> deepSeekReasoningEffort(fallbackBudget)
+            isOpenAiReasoningModel(modelName) -> openAiReasoningEffort(modelName, fallbackBudget)
+            isGeminiThinkingLevelModel(modelName) -> geminiThinkingLevel(fallbackBudget)
+            else -> ""
+        }
+    }
+
     private fun openAiResponsesReasoningEffort(modelName: String, budget: Int): String? {
         if (!isOpenAiReasoningModel(modelName)) return null
         if (budget <= 0) {
@@ -622,6 +656,12 @@ class LLMClient {
             }
         }
         return openAiReasoningEffort(modelName, budget)
+    }
+
+    private fun openAiResponsesReasoningEffort(modelName: String, budget: Int, level: String): String? {
+        val cleaned = level.trim().lowercase(Locale.US)
+        if (cleaned.isNotBlank()) return cleaned
+        return openAiResponsesReasoningEffort(modelName, budget)
     }
 
     private fun openAiReasoningEffort(modelName: String, budget: Int): String {

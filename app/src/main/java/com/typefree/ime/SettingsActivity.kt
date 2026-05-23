@@ -116,7 +116,12 @@ class SettingsActivity : ComponentActivity() {
                     onSelectChoice = { target, value -> saveChoice(target, value) },
                     onDismissChoice = { choiceDialog = null },
                     onOpenProviders = {
-                        currentScreen = Screen.PROVIDERS
+                        currentScreen = Screen.TEXT_PROVIDERS
+                        selectedProviderId = null
+                        refreshSnapshot()
+                    },
+                    onOpenAsrProviders = {
+                        currentScreen = Screen.ASR_PROVIDERS
                         selectedProviderId = null
                         refreshSnapshot()
                     },
@@ -164,13 +169,19 @@ class SettingsActivity : ComponentActivity() {
     private fun navigateBack() {
         when (currentScreen) {
             Screen.MAIN -> finish()
-            Screen.PROVIDERS -> {
+            Screen.TEXT_PROVIDERS,
+            Screen.ASR_PROVIDERS -> {
                 currentScreen = Screen.MAIN
                 selectedProviderId = null
                 refreshSnapshot()
             }
             Screen.PROVIDER_DETAIL -> {
-                currentScreen = Screen.PROVIDERS
+                val provider = snapshot.providers.firstOrNull { it.id == selectedProviderId }
+                currentScreen = if (provider?.capabilities?.supportsAsr == true && !provider.supportsTextGeneration()) {
+                    Screen.ASR_PROVIDERS
+                } else {
+                    Screen.TEXT_PROVIDERS
+                }
                 selectedProviderId = null
                 refreshSnapshot()
             }
@@ -240,7 +251,7 @@ class SettingsActivity : ComponentActivity() {
             preferenceManager.setAsrModelName("whisper-1")
         }
 
-        currentScreen = Screen.PROVIDERS
+        currentScreen = Screen.MAIN
         selectedProviderId = null
         refreshSnapshot()
         Toast.makeText(this, "服务商已删除", Toast.LENGTH_SHORT).show()
@@ -311,6 +322,8 @@ private val TYPE_OPTIONS = listOf(
     "volcengine_asr" to "火山豆包 ASR"
 )
 
+private val ASR_PROVIDER_TYPES = setOf("qwen_asr", "volcengine_asr")
+
 private data class SettingsSnapshot(
     val providers: List<ProviderConfig> = emptyList(),
     val userPinyinEntries: List<UserPinyinEntry> = emptyList(),
@@ -341,9 +354,15 @@ private data class ChoiceDialogState(
     val currentValue: String
 )
 
+private enum class ProviderListMode {
+    TEXT,
+    ASR
+}
+
 private enum class Screen {
     MAIN,
-    PROVIDERS,
+    TEXT_PROVIDERS,
+    ASR_PROVIDERS,
     PROVIDER_DETAIL,
     LOCAL_DICTIONARY
 }
@@ -377,6 +396,7 @@ private fun SettingsApp(
     onSelectChoice: (ChoiceTarget, String) -> Unit,
     onDismissChoice: () -> Unit,
     onOpenProviders: () -> Unit,
+    onOpenAsrProviders: () -> Unit,
     onOpenLocalDictionary: () -> Unit,
     onOpenProvider: (String) -> Unit,
     onAddProviderClick: () -> Unit,
@@ -399,7 +419,8 @@ private fun SettingsApp(
                     Text(
                         text = when (screen) {
                             Screen.MAIN -> "TypeFree 设置"
-                            Screen.PROVIDERS -> "API 服务商"
+                            Screen.TEXT_PROVIDERS -> "文本模型服务商"
+                            Screen.ASR_PROVIDERS -> "语音识别服务商"
                             Screen.PROVIDER_DETAIL -> "编辑服务商"
                             Screen.LOCAL_DICTIONARY -> "本地词典"
                         },
@@ -415,7 +436,7 @@ private fun SettingsApp(
                     }
                 },
                 actions = {
-                    if (screen == Screen.PROVIDERS) {
+                    if (screen == Screen.TEXT_PROVIDERS || screen == Screen.ASR_PROVIDERS) {
                         TextButton(onClick = onAddProviderClick) {
                             Text("添加")
                         }
@@ -433,11 +454,19 @@ private fun SettingsApp(
                 onOpenMapping = onOpenMapping,
                 onOpenChoice = onOpenChoice,
                 onOpenProviders = onOpenProviders,
+                onOpenAsrProviders = onOpenAsrProviders,
                 onOpenLocalDictionary = onOpenLocalDictionary
             )
-            Screen.PROVIDERS -> ProvidersScreen(
+            Screen.TEXT_PROVIDERS -> ProvidersScreen(
                 modifier = Modifier.padding(padding),
                 snapshot = snapshot,
+                mode = ProviderListMode.TEXT,
+                onOpenProvider = onOpenProvider
+            )
+            Screen.ASR_PROVIDERS -> ProvidersScreen(
+                modifier = Modifier.padding(padding),
+                snapshot = snapshot,
+                mode = ProviderListMode.ASR,
                 onOpenProvider = onOpenProvider
             )
             Screen.PROVIDER_DETAIL -> ProviderDetailScreen(
@@ -479,6 +508,10 @@ private fun SettingsApp(
 
     if (showAddProviderDialog) {
         AddProviderDialog(
+            mode = when (screen) {
+                Screen.ASR_PROVIDERS -> ProviderListMode.ASR
+                else -> ProviderListMode.TEXT
+            },
             onDismiss = onDismissAddProvider,
             onAdd = onAddProvider
         )
@@ -494,6 +527,7 @@ private fun SettingsMainScreen(
     onOpenMapping: (MappingDialogState) -> Unit,
     onOpenChoice: (ChoiceDialogState) -> Unit,
     onOpenProviders: () -> Unit,
+    onOpenAsrProviders: () -> Unit,
     onOpenLocalDictionary: () -> Unit
 ) {
     var testText by remember { mutableStateOf("") }
@@ -586,10 +620,16 @@ private fun SettingsMainScreen(
 
         SectionTitle("连接配置")
         ClickSettingRow(
-            title = "管理 API 服务商",
-            summary = "已添加 ${snapshot.providers.size} 个服务商"
+            title = "管理文本模型服务商",
+            summary = "已添加 ${snapshot.providers.count { it.supportsTextGeneration() }} 个文本服务商"
         ) {
             onOpenProviders()
+        }
+        ClickSettingRow(
+            title = "管理语音识别服务商",
+            summary = "已添加 ${snapshot.providers.count { it.capabilities.supportsAsr }} 个 ASR 服务商"
+        ) {
+            onOpenAsrProviders()
         }
 
         SectionTitle("本地词典")
@@ -728,21 +768,36 @@ private fun LocalDictionaryScreen(
 private fun ProvidersScreen(
     modifier: Modifier,
     snapshot: SettingsSnapshot,
+    mode: ProviderListMode,
     onOpenProvider: (String) -> Unit
 ) {
+    val providers = snapshot.providers.filter { provider ->
+        when (mode) {
+            ProviderListMode.TEXT -> provider.supportsTextGeneration()
+            ProviderListMode.ASR -> provider.capabilities.supportsAsr
+        }
+    }
+
     Column(
         modifier = modifier
             .verticalScroll(rememberScrollState())
             .padding(horizontal = 18.dp, vertical = 12.dp),
         verticalArrangement = Arrangement.spacedBy(8.dp)
     ) {
-        snapshot.providers.forEach { provider ->
+        providers.forEach { provider ->
             ClickSettingRow(
                 title = provider.name,
                 summary = "${providerTypeLabel(provider.type)} | ${provider.baseUrl.ifBlank { "未配置 Base URL" }}"
             ) {
                 onOpenProvider(provider.id)
             }
+        }
+        if (providers.isEmpty()) {
+            Text(
+                text = if (mode == ProviderListMode.ASR) "暂无语音识别服务商。" else "暂无文本模型服务商。",
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
         }
     }
 }
@@ -1358,22 +1413,41 @@ private fun ModelSettingsDialog(
     var thinkingBudget by remember(model) {
         mutableStateOf(settings.thinkingBudget.takeIf { it > 0 }?.toString().orEmpty())
     }
+    var thinkingLevel by remember(model) {
+        mutableStateOf(settings.thinkingLevel)
+    }
+    val levelOptions = thinkingLevelOptions(model)
+    val usesLevel = levelOptions.isNotEmpty()
 
     AlertDialog(
         onDismissRequest = onDismiss,
         title = { Text(model) },
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                OutlinedTextField(
-                    value = thinkingBudget,
-                    onValueChange = { value -> thinkingBudget = value.filter { it.isDigit() } },
-                    modifier = Modifier.fillMaxWidth(),
-                    label = { Text("该模型思考预算 tokens，0 或留空关闭") },
-                    singleLine = true,
-                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number)
-                )
+                if (usesLevel) {
+                    levelOptions.forEach { option ->
+                        RadioSettingRow(
+                            title = option.second,
+                            selected = thinkingLevel == option.first,
+                            onClick = { thinkingLevel = option.first }
+                        )
+                    }
+                } else {
+                    OutlinedTextField(
+                        value = thinkingBudget,
+                        onValueChange = { value -> thinkingBudget = value.filter { it.isDigit() } },
+                        modifier = Modifier.fillMaxWidth(),
+                        label = { Text("该模型思考预算 tokens，0 或留空关闭") },
+                        singleLine = true,
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number)
+                    )
+                }
                 Text(
-                    text = "不同模型会自动映射到各自支持的参数，例如 OpenAI reasoning.effort、Gemini thinkingConfig、DeepSeek thinking。",
+                    text = if (usesLevel) {
+                        "该模型使用官方思考等级参数。"
+                    } else {
+                        "该模型使用官方 token 预算参数。"
+                    },
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
@@ -1382,7 +1456,13 @@ private fun ModelSettingsDialog(
         confirmButton = {
             TextButton(
                 onClick = {
-                    onSave(ModelSettings(thinkingBudget = thinkingBudget.toIntOrNull() ?: 0))
+                    onSave(
+                        if (usesLevel) {
+                            ModelSettings(thinkingLevel = thinkingLevel)
+                        } else {
+                            ModelSettings(thinkingBudget = thinkingBudget.toIntOrNull() ?: 0)
+                        }
+                    )
                 }
             ) {
                 Text("保存")
@@ -1398,13 +1478,15 @@ private fun ModelSettingsDialog(
 
 @Composable
 private fun AddProviderDialog(
+    mode: ProviderListMode,
     onDismiss: () -> Unit,
     onAdd: (ProviderConfig) -> Unit
 ) {
     var name by remember { mutableStateOf("") }
     var baseUrl by remember { mutableStateOf("") }
     var apiKey by remember { mutableStateOf("") }
-    var type by remember { mutableStateOf(TYPE_OPTIONS.first().first) }
+    val options = providerTypeOptions(mode)
+    var type by remember(mode) { mutableStateOf(options.first().first) }
 
     AlertDialog(
         onDismissRequest = onDismiss,
@@ -1437,7 +1519,7 @@ private fun AddProviderDialog(
                     singleLine = true
                 )
                 Text("API 协议类型", style = MaterialTheme.typography.labelLarge)
-                TYPE_OPTIONS.forEach { option ->
+                options.forEach { option ->
                     RadioSettingRow(
                         title = option.second,
                         selected = type == option.first,
@@ -1455,7 +1537,12 @@ private fun AddProviderDialog(
                             name = name.trim(),
                             baseUrl = baseUrl.trim(),
                             apiKey = apiKey.trim(),
-                            type = type
+                            type = type,
+                            capabilities = if (mode == ProviderListMode.ASR) {
+                                ProviderCapabilities(supportsAsr = true)
+                            } else {
+                                ProviderCapabilities(supportsStructuredOutput = true, supportsToolCalling = true)
+                            }
                         )
                     )
                 },
@@ -1574,6 +1661,19 @@ private fun providerTypeLabel(type: String): String {
     return TYPE_OPTIONS.firstOrNull { it.first == type }?.second ?: type
 }
 
+private fun providerTypeOptions(mode: ProviderListMode): List<Pair<String, String>> {
+    return TYPE_OPTIONS.filter { option ->
+        when (mode) {
+            ProviderListMode.TEXT -> option.first !in ASR_PROVIDER_TYPES
+            ProviderListMode.ASR -> option.first in ASR_PROVIDER_TYPES
+        }
+    }
+}
+
+private fun ProviderConfig.supportsTextGeneration(): Boolean {
+    return capabilities.supportsStructuredOutput || capabilities.supportsToolCalling
+}
+
 private fun capabilitiesSummary(capabilities: ProviderCapabilities): String {
     val enabled = mutableListOf<String>()
     if (capabilities.supportsModelList) enabled.add("模型列表")
@@ -1589,12 +1689,47 @@ private fun capabilitiesSummary(capabilities: ProviderCapabilities): String {
 }
 
 private fun modelSettingsSummary(settings: ModelSettings?): String {
+    val level = settings?.thinkingLevel.orEmpty()
     val budget = settings?.thinkingBudget ?: 0
-    return if (budget > 0) {
+    return if (level.isNotBlank()) {
+        "思考等级: ${thinkingLevelLabel(level)}"
+    } else if (budget > 0) {
         "思考预算: $budget tokens"
     } else {
         "思考预算: 关闭"
     }
+}
+
+private fun thinkingLevelOptions(model: String): List<Pair<String, String>> {
+    val normalized = normalizedModelName(model)
+    return when {
+        normalized.contains("deepseek") -> listOf(
+            "" to "关闭",
+            "high" to "High",
+            "max" to "Max"
+        )
+        normalized.startsWith("gpt5") || normalized.startsWith("gpt-5") -> listOf(
+            "" to "关闭",
+            "minimal" to "Minimal",
+            "low" to "Low",
+            "medium" to "Medium",
+            "high" to "High"
+        )
+        normalized.startsWith("gemini3") || normalized.startsWith("gemini-3") -> listOf(
+            "" to "关闭",
+            "low" to "Low",
+            "high" to "High"
+        )
+        else -> emptyList()
+    }
+}
+
+private fun thinkingLevelLabel(level: String): String {
+    return level.ifBlank { "关闭" }.replaceFirstChar { it.uppercase() }
+}
+
+private fun normalizedModelName(model: String): String {
+    return model.lowercase(Locale.US).replace(".", "").replace("_", "-")
 }
 
 private fun languageLabel(value: String): String {

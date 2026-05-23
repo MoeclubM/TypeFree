@@ -59,21 +59,28 @@ class LLMClientTest {
 
     @Test
     fun openAiResponsesBodyUsesJsonSchemaTextFormat() {
-        val body = parseObject(client.buildOpenAiResponsesRequestBody("gpt5.4flash", "system", "user", 2048))
+        val body = parseObject(client.buildOpenAiResponsesRequestBody("gpt5.4flash", "system", "user", 2048, "high"))
 
         assertEquals("gpt5.4flash", body["model"]?.jsonPrimitive?.content)
         val textFormat = body["text"]?.jsonObject?.get("format")?.jsonObject
         assertEquals("json_schema", textFormat?.get("type")?.jsonPrimitive?.content)
         assertEquals("candidate_list", textFormat?.get("name")?.jsonPrimitive?.content)
         assertEquals("true", textFormat?.get("strict")?.jsonPrimitive?.content)
-        assertEquals("medium", body["reasoning"]?.jsonObject?.get("effort")?.jsonPrimitive?.content)
+        assertEquals("high", body["reasoning"]?.jsonObject?.get("effort")?.jsonPrimitive?.content)
     }
 
     @Test
     fun openAiResponsesMapsSmallBudgetForGpt5Series() {
-        val body = parseObject(client.buildOpenAiResponsesRequestBody("gpt-5.4-mini", "system", "user", 512))
+        val body = parseObject(client.buildOpenAiResponsesRequestBody("gpt-5.4-mini", "system", "user", 0, "medium"))
 
-        assertEquals("minimal", body["reasoning"]?.jsonObject?.get("effort")?.jsonPrimitive?.content)
+        assertEquals("medium", body["reasoning"]?.jsonObject?.get("effort")?.jsonPrimitive?.content)
+    }
+
+    @Test
+    fun gpt53SeriesUsesConfiguredReasoningLevel() {
+        val body = parseObject(client.buildOpenAiResponsesRequestBody("gpt-5.3-codex-spark", "system", "user", 0, "low"))
+
+        assertEquals("low", body["reasoning"]?.jsonObject?.get("effort")?.jsonPrimitive?.content)
     }
 
     @Test
@@ -85,11 +92,12 @@ class LLMClientTest {
                 userPrompt = "user",
                 responseFormat = json.parseToJsonElement("""{"type":"json_object"}""").jsonObject,
                 thinkingBudget = 8192,
+                thinkingLevel = "high",
                 providerType = "openai"
             )
         )
 
-        assertEquals("max", body["reasoning_effort"]?.jsonPrimitive?.content)
+        assertEquals("high", body["reasoning_effort"]?.jsonPrimitive?.content)
         assertEquals("enabled", body["thinking"]?.jsonObject?.get("type")?.jsonPrimitive?.content)
     }
 

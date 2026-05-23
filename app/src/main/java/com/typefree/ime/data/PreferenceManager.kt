@@ -24,7 +24,8 @@ data class ProviderConfig(
 
 @Serializable
 data class ModelSettings(
-    val thinkingBudget: Int = 0
+    val thinkingBudget: Int = 0,
+    val thinkingLevel: String = ""
 )
 
 @Serializable
