@@ -1,48 +1,36 @@
 package com.typefree.ime
 
 import android.content.Intent
-import androidx.lifecycle.setViewTreeLifecycleOwner
-import androidx.lifecycle.setViewTreeViewModelStoreOwner
-import androidx.savedstate.setViewTreeSavedStateRegistryOwner
 import android.inputmethodservice.InputMethodService
 import android.view.View
 import android.view.inputmethod.EditorInfo
-import androidx.compose.runtime.collectAsState
-import androidx.compose.runtime.getValue
-import androidx.compose.ui.platform.ComposeView
-import androidx.lifecycle.Lifecycle
-import androidx.lifecycle.LifecycleOwner
-import androidx.lifecycle.LifecycleRegistry
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.ViewModelStore
 import androidx.lifecycle.ViewModelStoreOwner
-
-import androidx.savedstate.SavedStateRegistry
-import androidx.savedstate.SavedStateRegistryController
-import androidx.savedstate.SavedStateRegistryOwner
-
 import com.typefree.ime.data.PreferenceManager
 import com.typefree.ime.service.ASRClient
 import com.typefree.ime.service.PinyinEngine
-import com.typefree.ime.ui.KeyboardView
-import com.typefree.ime.ui.theme.TypeFreeTheme
+import com.typefree.ime.ui.NativeKeyboardView
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.launch
 
 class TypeFreeIME : InputMethodService(),
-    LifecycleOwner,
-    ViewModelStoreOwner,
-    SavedStateRegistryOwner {
+    ViewModelStoreOwner {
 
-    private val lifecycleRegistry = LifecycleRegistry(this)
     private val store = ViewModelStore()
-    private val savedStateRegistryController = SavedStateRegistryController.create(this)
-
-    override val lifecycle: Lifecycle get() = lifecycleRegistry
     override val viewModelStore: ViewModelStore get() = store
-    override val savedStateRegistry: SavedStateRegistry get() = savedStateRegistryController.savedStateRegistry
 
     private lateinit var preferenceManager: PreferenceManager
     private lateinit var pinyinEngine: PinyinEngine
     private lateinit var asrClient: ASRClient
+    private val uiScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
+    private var inputViewBindingJob: Job? = null
+
     private val viewModel: InputViewModel by lazy {
         ViewModelProvider(this, InputViewModelFactory(this, preferenceManager, pinyinEngine, asrClient))
             .get(InputViewModel::class.java)
@@ -50,9 +38,6 @@ class TypeFreeIME : InputMethodService(),
 
     override fun onCreate() {
         super.onCreate()
-        savedStateRegistryController.performAttach()
-        savedStateRegistryController.performRestore(null)
-        lifecycleRegistry.handleLifecycleEvent(Lifecycle.Event.ON_CREATE)
 
         preferenceManager = PreferenceManager(this)
         pinyinEngine = PinyinEngine(this, preferenceManager)
@@ -60,46 +45,47 @@ class TypeFreeIME : InputMethodService(),
     }
 
     override fun onCreateInputView(): View {
-        if (lifecycleRegistry.currentState == Lifecycle.State.CREATED) {
-            lifecycleRegistry.handleLifecycleEvent(Lifecycle.Event.ON_START)
-            lifecycleRegistry.handleLifecycleEvent(Lifecycle.Event.ON_RESUME)
+        val keyboardView = NativeKeyboardView(this).apply {
+            callbacks = object : NativeKeyboardView.Callbacks {
+                override fun onKeyClick(key: String) = viewModel.onKeyClick(key)
+                override fun onBackspace() = viewModel.onBackspace()
+                override fun onSpace() = viewModel.onSpace()
+                override fun onEnter() = viewModel.onEnter()
+                override fun onCandidateClick(candidate: com.typefree.ime.service.Candidate) {
+                    viewModel.onCandidateClick(candidate)
+                }
+                override fun onToggleLanguage() = viewModel.onToggleLanguage()
+                override fun onMicClick() = viewModel.onMicClick()
+                override fun onSettingsClick() {
+                    startActivity(Intent(this@TypeFreeIME, SettingsActivity::class.java).apply {
+                        addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                    })
+                }
+            }
         }
 
-        val composeView = ComposeView(this)
-        composeView.setViewTreeLifecycleOwner(this)
-        composeView.setViewTreeViewModelStoreOwner(this)
-        composeView.setViewTreeSavedStateRegistryOwner(this)
-
-        composeView.setContent {
-            TypeFreeTheme {
-                val pinyinBuffer by viewModel.pinyinBuffer.collectAsState()
-                val candidates by viewModel.candidates.collectAsState()
-                val isChinese by viewModel.isChinese.collectAsState()
-                val recState by viewModel.recordingState.collectAsState()
-                val recError by viewModel.recordingError.collectAsState()
-
-                KeyboardView(
+        inputViewBindingJob?.cancel()
+        inputViewBindingJob = uiScope.launch {
+            combine(
+                viewModel.pinyinBuffer,
+                viewModel.candidates,
+                viewModel.isChinese,
+                viewModel.recordingState,
+                viewModel.recordingError
+            ) { pinyinBuffer, candidates, isChinese, recordingState, recordingError ->
+                NativeKeyboardView.State(
                     pinyinBuffer = pinyinBuffer,
                     candidates = candidates,
                     isChinese = isChinese,
-                    recordingState = recState,
-                    recordingError = recError,
-                    onKeyClick = { viewModel.onKeyClick(it) },
-                    onBackspace = { viewModel.onBackspace() },
-                    onSpace = { viewModel.onSpace() },
-                    onEnter = { viewModel.onEnter() },
-                    onCandidateClick = { viewModel.onCandidateClick(it) },
-                    onToggleLanguage = { viewModel.onToggleLanguage() },
-                    onMicClick = { viewModel.onMicClick() },
-                    onSettingsClick = {
-                        startActivity(Intent(this, SettingsActivity::class.java).apply {
-                            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                        })
-                    }
+                    recordingState = recordingState,
+                    recordingError = recordingError
                 )
+            }.collect { state ->
+                keyboardView.render(state)
             }
         }
-        return composeView
+
+        return keyboardView
     }
 
     override fun onStartInput(attribute: EditorInfo?, restarting: Boolean) {
@@ -114,27 +100,20 @@ class TypeFreeIME : InputMethodService(),
 
     override fun onWindowShown() {
         super.onWindowShown()
-        if (lifecycleRegistry.currentState == Lifecycle.State.CREATED) {
-            lifecycleRegistry.handleLifecycleEvent(Lifecycle.Event.ON_START)
-            lifecycleRegistry.handleLifecycleEvent(Lifecycle.Event.ON_RESUME)
-        }
     }
 
     override fun onWindowHidden() {
         super.onWindowHidden()
-        if (lifecycleRegistry.currentState.isAtLeast(Lifecycle.State.STARTED)) {
-            lifecycleRegistry.handleLifecycleEvent(Lifecycle.Event.ON_PAUSE)
-            lifecycleRegistry.handleLifecycleEvent(Lifecycle.Event.ON_STOP)
-        }
         viewModel.onWindowHidden()
     }
 
     override fun onDestroy() {
         super.onDestroy()
-        lifecycleRegistry.handleLifecycleEvent(Lifecycle.Event.ON_DESTROY)
+        inputViewBindingJob?.cancel()
+        uiScope.cancel()
         store.clear()
-        pinyinEngine.destroy()
-        asrClient.destroy()
+        if (::pinyinEngine.isInitialized) pinyinEngine.destroy()
+        if (::asrClient.isInitialized) asrClient.destroy()
     }
 }
 
