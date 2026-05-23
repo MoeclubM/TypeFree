@@ -16,7 +16,11 @@ class PinyinEngine(context: Context, private val preferenceManager: PreferenceMa
     private val llmClient = LLMClient()
     
     private val scope = CoroutineScope(Dispatchers.Main + SupervisorJob())
+    private var localJob: Job? = null
     private var llmJob: Job? = null
+    private var latestPinyinInput = ""
+    private var latestLocalCandidates: List<Candidate> = emptyList()
+    private var latestAiCandidates: List<Candidate> = emptyList()
 
     interface CandidateListener {
         fun onCandidatesUpdated(candidates: List<Candidate>)
@@ -31,19 +35,28 @@ class PinyinEngine(context: Context, private val preferenceManager: PreferenceMa
         contextText: String,
         listener: CandidateListener
     ) {
-        llmJob?.cancel() // Cancel previous pending LLM request
+        localJob?.cancel()
+        llmJob?.cancel()
+        latestPinyinInput = pinyin
+        latestLocalCandidates = emptyList()
+        latestAiCandidates = emptyList()
 
         if (pinyin.isEmpty()) {
             listener.onCandidatesUpdated(emptyList())
             return
         }
 
-        // 1. Get local candidates instantly
-        val localWords = pinyinDict.getCandidates(pinyin)
-        val initialCandidates = localWords.map { Candidate(it, false) }
-        listener.onCandidatesUpdated(initialCandidates)
+        localJob = scope.launch {
+            val initialCandidates = withContext(Dispatchers.IO) {
+                pinyinDict.getCandidates(pinyin).map { Candidate(it, isAi = false) }
+            }
 
-        // 2. Fetch LLM-refined candidates if enabled
+            if (latestPinyinInput == pinyin) {
+                latestLocalCandidates = initialCandidates
+                emitMergedCandidates(listener)
+            }
+        }
+
         if (preferenceManager.isPinyinLlmEnabled()) {
             val providerId = preferenceManager.getPinyinProviderId()
             val provider = preferenceManager.getProvider(providerId) ?: PreferenceManager.DEFAULT_PROVIDERS.first()
@@ -55,16 +68,9 @@ class PinyinEngine(context: Context, private val preferenceManager: PreferenceMa
                     delay(300)
                     
                     val aiWords = llmClient.translatePinyin(provider, modelName, pinyin, contextText)
-                    if (aiWords.isNotEmpty()) {
-                        val aiCandidates = aiWords.map { Candidate(it, isAi = true) }
-                        
-                        // Merge lists: put AI candidates at the front, followed by remaining local candidates
-                        val merged = (aiCandidates + initialCandidates)
-                            .distinctBy { it.text }
-                        
-                        withContext(Dispatchers.Main) {
-                            listener.onCandidatesUpdated(merged)
-                        }
+                    if (aiWords.isNotEmpty() && latestPinyinInput == pinyin) {
+                        latestAiCandidates = aiWords.map { Candidate(it, isAi = true) }
+                        emitMergedCandidates(listener)
                     }
                 } catch (e: CancellationException) {
                     // Task was cancelled, ignore
@@ -73,6 +79,10 @@ class PinyinEngine(context: Context, private val preferenceManager: PreferenceMa
                 }
             }
         }
+    }
+
+    fun commitCandidate(candidate: Candidate): String {
+        return candidate.text
     }
 
     /**
@@ -109,5 +119,9 @@ class PinyinEngine(context: Context, private val preferenceManager: PreferenceMa
 
     fun destroy() {
         scope.cancel()
+    }
+
+    private fun emitMergedCandidates(listener: CandidateListener) {
+        listener.onCandidatesUpdated((latestAiCandidates + latestLocalCandidates).distinctBy { it.text })
     }
 }

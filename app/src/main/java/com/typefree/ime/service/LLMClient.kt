@@ -207,19 +207,31 @@ class LLMClient {
             if (jsonElement is kotlinx.serialization.json.JsonArray) {
                 return jsonElement.map { it.jsonPrimitive.content }
             }
+            if (jsonElement is kotlinx.serialization.json.JsonObject) {
+                val firstArray = jsonElement.values
+                    .firstOrNull { it is kotlinx.serialization.json.JsonArray }
+                    as? kotlinx.serialization.json.JsonArray
+                if (firstArray != null) {
+                    return firstArray.mapNotNull { element ->
+                        runCatching { element.jsonPrimitive.content }.getOrNull()
+                    }
+                }
+            }
         } catch (e: Exception) {
             Log.e("LLMClient", "JSON array parsing failed: $clean", e)
             
             // Fallback parsing: search for arrays using regex or split
             try {
-                val regex = Regex("\\[\\s*\"(.*?)\"\\s*(?:,\\s*\"(.*?)\"\\s*)*\\]")
-                val match = regex.find(clean)
-                if (match != null) {
-                    val list = mutableListOf<String>()
-                    for (groupVal in match.groupValues.drop(1)) {
-                        if (groupVal.isNotEmpty()) list.add(groupVal)
-                    }
-                    return list
+                val arrayBody = Regex("\\[(.*)]", RegexOption.DOT_MATCHES_ALL)
+                    .find(clean)
+                    ?.groupValues
+                    ?.getOrNull(1)
+                if (arrayBody != null) {
+                    val quotedItems = Regex("\"([^\"]+)\"")
+                        .findAll(arrayBody)
+                        .map { it.groupValues[1] }
+                        .toList()
+                    if (quotedItems.isNotEmpty()) return quotedItems
                 }
             } catch (ex: Exception) {
                 // Keep moving to simple line/comma splits

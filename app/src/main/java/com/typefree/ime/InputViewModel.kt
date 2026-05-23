@@ -58,8 +58,14 @@ class InputViewModel(
     fun onKeyClick(key: String) {
         val ic = service.currentInputConnection ?: return
         if (_isChinese.value) {
-            _pinyinBuffer.value += key.lowercase()
-            updatePinyinCandidates()
+            if (isPinyinLetter(key)) {
+                _pinyinBuffer.value += key.lowercase()
+                updatePinyinCandidates()
+            } else {
+                commitPendingComposition()
+                ic.commitText(key, 1)
+                fetchContextPredictions()
+            }
         } else {
             ic.commitText(key, 1)
         }
@@ -81,6 +87,12 @@ class InputViewModel(
         val currentCandidates = _candidates.value
         if (_isChinese.value && currentCandidates.isNotEmpty()) {
             commitCandidate(currentCandidates[0])
+        } else if (_isChinese.value && _pinyinBuffer.value.isNotEmpty()) {
+            ic.commitText(_pinyinBuffer.value, 1)
+            _pinyinBuffer.value = ""
+            _candidates.value = emptyList()
+            ic.commitText(" ", 1)
+            fetchContextPredictions()
         } else {
             ic.commitText(" ", 1)
             _pinyinBuffer.value = ""
@@ -172,10 +184,24 @@ class InputViewModel(
     }
 
     private fun commitCandidate(candidate: Candidate) {
-        service.currentInputConnection?.commitText(candidate.text, 1)
+        val text = pinyinEngine.commitCandidate(candidate)
+        service.currentInputConnection?.commitText(text, 1)
         _pinyinBuffer.value = ""
         _candidates.value = emptyList()
         fetchContextPredictions()
+    }
+
+    private fun commitPendingComposition() {
+        val ic = service.currentInputConnection ?: return
+        val currentCandidates = _candidates.value
+        if (_isChinese.value && currentCandidates.isNotEmpty()) {
+            val text = pinyinEngine.commitCandidate(currentCandidates[0])
+            ic.commitText(text, 1)
+        } else if (_isChinese.value && _pinyinBuffer.value.isNotEmpty()) {
+            ic.commitText(_pinyinBuffer.value, 1)
+        }
+        _pinyinBuffer.value = ""
+        _candidates.value = emptyList()
     }
 
     private fun updatePinyinCandidates() {
@@ -183,7 +209,9 @@ class InputViewModel(
         val contextText = getTypingContext()
         pinyinEngine.processInput(pinyin, contextText, object : PinyinEngine.CandidateListener {
             override fun onCandidatesUpdated(candidates: List<Candidate>) {
-                _candidates.value = candidates
+                if (_pinyinBuffer.value == pinyin) {
+                    _candidates.value = candidates
+                }
             }
         })
     }
@@ -225,5 +253,9 @@ class InputViewModel(
 
     companion object {
         private const val CONTEXT_CHAR_COUNT = 50
+
+        private fun isPinyinLetter(key: String): Boolean {
+            return key.length == 1 && key[0].lowercaseChar() in 'a'..'z'
+        }
     }
 }

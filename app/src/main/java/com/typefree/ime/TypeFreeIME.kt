@@ -50,6 +50,7 @@ class TypeFreeIME : InputMethodService(),
 
     override fun onCreate() {
         super.onCreate()
+        savedStateRegistryController.performAttach()
         savedStateRegistryController.performRestore(null)
         lifecycleRegistry.handleLifecycleEvent(Lifecycle.Event.ON_CREATE)
 
