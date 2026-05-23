@@ -50,7 +50,6 @@ class InputViewModel(
     }
 
     fun onWindowHidden() {
-        asrClient.stopLocalSpeech()
         asrClient.stopApiRecording()
         _recordingState.value = RecordingState.IDLE
     }
@@ -86,7 +85,7 @@ class InputViewModel(
         val ic = service.currentInputConnection ?: return
         val currentCandidates = _candidates.value
         if (_isChinese.value && currentCandidates.isNotEmpty()) {
-            commitCandidate(currentCandidates[0])
+            commitCandidate(currentCandidates[0], learnAiSelection = true)
         } else if (_isChinese.value && _pinyinBuffer.value.isNotEmpty()) {
             ic.commitText(_pinyinBuffer.value, 1)
             _pinyinBuffer.value = ""
@@ -103,10 +102,7 @@ class InputViewModel(
 
     fun onEnter() {
         val ic = service.currentInputConnection ?: return
-        val currentCandidates = _candidates.value
-        if (_isChinese.value && currentCandidates.isNotEmpty()) {
-            commitCandidate(currentCandidates[0])
-        } else if (_isChinese.value && _pinyinBuffer.value.isNotEmpty()) {
+        if (_isChinese.value && _pinyinBuffer.value.isNotEmpty()) {
             ic.commitText(_pinyinBuffer.value, 1)
             _pinyinBuffer.value = ""
             _candidates.value = emptyList()
@@ -118,7 +114,7 @@ class InputViewModel(
     }
 
     fun onCandidateClick(candidate: Candidate) {
-        commitCandidate(candidate)
+        commitCandidate(candidate, learnAiSelection = true)
     }
 
     fun onPinyinClick(index: Int) {
@@ -150,54 +146,39 @@ class InputViewModel(
             return
         }
 
-        val mode = preferenceManager.getAsrMode()
-
-        if (mode == "local") {
-            if (_recordingState.value == RecordingState.RECORDING) {
-                asrClient.stopLocalSpeech()
-                _recordingState.value = RecordingState.IDLE
+        if (_recordingState.value == RecordingState.RECORDING) {
+            _recordingState.value = RecordingState.TRANSCRIBING
+            val audioFile = asrClient.stopApiRecording()
+            if (audioFile != null && audioFile.exists()) {
+                val providerId = preferenceManager.getAsrProviderId()
+                val provider = preferenceManager.getProvider(providerId) ?: PreferenceManager.DEFAULT_PROVIDERS.first()
+                val modelName = preferenceManager.getAsrModelName()
+                val language = preferenceManager.getAsrLanguage()
+                transcribeAudioFile(provider, modelName, language, audioFile)
             } else {
-                _recordingState.value = RecordingState.RECORDING
-                asrClient.startLocalSpeech(object : ASRClient.ASRListener {
-                    override fun onStartListening() {}
-                    override fun onResult(text: String) {
-                        service.currentInputConnection?.commitText(text, 1)
-                        _recordingState.value = RecordingState.IDLE
-                    }
-                    override fun onError(error: String) {
-                        _recordingError.value = error
-                        _recordingState.value = RecordingState.ERROR
-                    }
-                })
+                _recordingError.value = "Failed to record audio"
+                _recordingState.value = RecordingState.ERROR
             }
         } else {
-            if (_recordingState.value == RecordingState.RECORDING) {
-                _recordingState.value = RecordingState.TRANSCRIBING
-                val audioFile = asrClient.stopApiRecording()
-                if (audioFile != null && audioFile.exists()) {
-                    val providerId = preferenceManager.getAsrProviderId()
-                    val provider = preferenceManager.getProvider(providerId) ?: PreferenceManager.DEFAULT_PROVIDERS.first()
-                    val modelName = preferenceManager.getAsrModelName()
-                    val language = preferenceManager.getAsrLanguage()
-                    transcribeAudioFile(provider, modelName, language, audioFile)
-                } else {
-                    _recordingError.value = "Failed to record audio"
-                    _recordingState.value = RecordingState.ERROR
-                }
+            val started = asrClient.startApiRecording()
+            if (started) {
+                _recordingState.value = RecordingState.RECORDING
             } else {
-                val started = asrClient.startApiRecording()
-                if (started) {
-                    _recordingState.value = RecordingState.RECORDING
-                } else {
-                    _recordingError.value = "Microphone initialization failed"
-                    _recordingState.value = RecordingState.ERROR
-                }
+                _recordingError.value = "Microphone initialization failed"
+                _recordingState.value = RecordingState.ERROR
             }
         }
     }
 
-    private fun commitCandidate(candidate: Candidate) {
-        val text = pinyinEngine.commitCandidate(candidate)
+    private fun commitCandidate(candidate: Candidate, learnAiSelection: Boolean) {
+        val sourcePinyin = _pinyinBuffer.value
+        val contextText = getTypingContext()
+        val text = pinyinEngine.commitCandidate(
+            candidate = candidate,
+            sourcePinyin = sourcePinyin,
+            contextText = contextText,
+            learnAiSelection = learnAiSelection
+        )
         service.currentInputConnection?.commitText(text, 1)
         _pinyinBuffer.value = ""
         _candidates.value = emptyList()
@@ -208,7 +189,12 @@ class InputViewModel(
         val ic = service.currentInputConnection ?: return
         val currentCandidates = _candidates.value
         if (_isChinese.value && currentCandidates.isNotEmpty()) {
-            val text = pinyinEngine.commitCandidate(currentCandidates[0])
+            val text = pinyinEngine.commitCandidate(
+                candidate = currentCandidates[0],
+                sourcePinyin = _pinyinBuffer.value,
+                contextText = getTypingContext(),
+                learnAiSelection = false
+            )
             ic.commitText(text, 1)
         } else if (_isChinese.value && _pinyinBuffer.value.isNotEmpty()) {
             ic.commitText(_pinyinBuffer.value, 1)

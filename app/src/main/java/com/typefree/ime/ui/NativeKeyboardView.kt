@@ -45,6 +45,10 @@ class NativeKeyboardView(context: Context) : LinearLayout(context) {
     var callbacks: Callbacks? = null
 
     private var layoutMode = KeyboardLayout.ALPHA
+    private var symbolsPage = 0
+    private var emojiPage = 0
+    private var emojiSearchMode = false
+    private var emojiSearchQuery = ""
     private var shiftActive = false
     private var state = State("", emptyList(), true, RecordingState.IDLE, "")
     private var renderedToolbarSignature = ""
@@ -56,6 +60,7 @@ class NativeKeyboardView(context: Context) : LinearLayout(context) {
     private val activePointers = mutableMapOf<Int, KeyTouchTarget>()
     private val activeBackspacePointers = mutableSetOf<Int>()
     private val targetRect = Rect()
+    private val emojiEntries = EmojiCatalog.load(context)
 
     private val repeatHandler = Handler(Looper.getMainLooper())
     private var repeatingBackspace = false
@@ -196,17 +201,39 @@ class NativeKeyboardView(context: Context) : LinearLayout(context) {
         toolbarHost.background = roundedBackground(TOOLBAR_COLOR, dp(10), BORDER_COLOR)
         toolbarHost.setPadding(dp(6), 0, dp(6), 0)
 
-        val title = statusText(if (state.isChinese) "中文" else "English", MUTED_TEXT_COLOR).apply {
-            textSize = 13f
+        if (emojiSearchMode) {
+            toolbarHost.addView(
+                statusText("🔎 ${emojiSearchQuery.ifBlank { "搜索 emoji" }}", MUTED_TEXT_COLOR),
+                LayoutParams(0, LayoutParams.MATCH_PARENT, 1f)
+            )
+        } else {
+            toolbarHost.addView(View(context), LayoutParams(0, LayoutParams.MATCH_PARENT, 1f))
         }
-        toolbarHost.addView(title, LayoutParams(0, LayoutParams.MATCH_PARENT, 1f))
+
+        if (layoutMode == KeyboardLayout.EMOJI) {
+            toolbarHost.addView(toolbarButton("🔎", isActive = emojiSearchMode) {
+                emojiSearchMode = true
+                renderToolbar()
+                renderCandidateBar()
+                renderTopVisibility()
+                renderRows()
+                renderedToolbarSignature = toolbarSignature()
+                renderedCandidateSignature = candidateSignature()
+                renderedTopVisibilitySignature = topVisibilitySignature()
+            })
+        }
 
         toolbarHost.addView(toolbarButton("☺", isActive = layoutMode == KeyboardLayout.EMOJI) {
             layoutMode = KeyboardLayout.EMOJI
+            emojiSearchMode = false
             shiftActive = false
             renderRows()
             renderToolbar()
+            renderCandidateBar()
+            renderTopVisibility()
             renderedToolbarSignature = toolbarSignature()
+            renderedCandidateSignature = candidateSignature()
+            renderedTopVisibilitySignature = topVisibilitySignature()
         })
         toolbarHost.addView(toolbarButton("🎙", isActive = state.recordingState == RecordingState.RECORDING) {
             callbacks?.onMicClick()
@@ -228,6 +255,27 @@ class NativeKeyboardView(context: Context) : LinearLayout(context) {
                 candidateHost.gravity = Gravity.CENTER
                 candidateHost.addView(statusText(recordingMessage(), recordingColor()))
             }
+            emojiSearchMode -> {
+                val results = emojiSearchResults()
+                if (results.isEmpty()) {
+                    candidateHost.gravity = Gravity.CENTER
+                    candidateHost.addView(statusText("无结果", MUTED_TEXT_COLOR))
+                } else {
+                    val scrollView = HorizontalScrollView(context).apply {
+                        isHorizontalScrollBarEnabled = false
+                        overScrollMode = OVER_SCROLL_NEVER
+                    }
+                    val row = LinearLayout(context).apply {
+                        orientation = HORIZONTAL
+                        gravity = Gravity.CENTER_VERTICAL
+                    }
+                    results.forEach { entry ->
+                        row.addView(emojiCandidateView(entry))
+                    }
+                    scrollView.addView(row, LayoutParams(LayoutParams.WRAP_CONTENT, LayoutParams.MATCH_PARENT))
+                    candidateHost.addView(scrollView, LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.MATCH_PARENT))
+                }
+            }
             isComposing() && state.candidates.isNotEmpty() -> {
                 val scrollView = HorizontalScrollView(context).apply {
                     isHorizontalScrollBarEnabled = false
@@ -244,17 +292,7 @@ class NativeKeyboardView(context: Context) : LinearLayout(context) {
                 candidateHost.addView(scrollView, LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.MATCH_PARENT))
             }
             else -> {
-                candidateHost.addView(
-                    statusText(if (state.isChinese) "TypeFree 中文" else "TypeFree EN", MUTED_TEXT_COLOR),
-                    LayoutParams(0, LayoutParams.MATCH_PARENT, 1f)
-                )
-                val modeText = TextView(context).apply {
-                    text = if (state.isChinese) "拼音" else "English"
-                    textSize = 13f
-                    setTextColor(MUTED_TEXT_COLOR)
-                    gravity = Gravity.CENTER
-                }
-                candidateHost.addView(modeText, LayoutParams(LayoutParams.WRAP_CONTENT, LayoutParams.MATCH_PARENT))
+                // Keep the candidate area empty when there is nothing actionable to show.
             }
         }
     }
@@ -267,7 +305,11 @@ class NativeKeyboardView(context: Context) : LinearLayout(context) {
         val composing = isComposing()
         toolbarHost.visibility = if (composing) GONE else VISIBLE
         pinyinText.visibility = if (composing) VISIBLE else GONE
-        candidateHost.visibility = if (composing || state.recordingState != RecordingState.IDLE) VISIBLE else GONE
+        candidateHost.visibility = if (
+            state.recordingState != RecordingState.IDLE ||
+            emojiSearchMode ||
+            (composing && state.candidates.isNotEmpty())
+        ) VISIBLE else GONE
     }
 
     private fun renderRows() {
@@ -306,6 +348,24 @@ class NativeKeyboardView(context: Context) : LinearLayout(context) {
             setOnClickListener {
                 performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
                 callbacks?.onCandidateClick(candidate)
+            }
+        }.also {
+            it.layoutParams = LayoutParams(LayoutParams.WRAP_CONTENT, LayoutParams.MATCH_PARENT)
+        }
+    }
+
+    private fun emojiCandidateView(entry: EmojiEntry): View {
+        return TextView(context).apply {
+            text = entry.value
+            textSize = 24f
+            setTextColor(TEXT_COLOR)
+            gravity = Gravity.CENTER
+            setPadding(dp(10), 0, dp(10), 0)
+            minWidth = dp(44)
+            background = selectableBackground(Color.TRANSPARENT, dp(8), Color.TRANSPARENT)
+            setOnClickListener {
+                performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
+                callbacks?.onKeyClick(entry.value)
             }
         }.also {
             it.layoutParams = LayoutParams(LayoutParams.WRAP_CONTENT, LayoutParams.MATCH_PARENT)
@@ -433,20 +493,70 @@ class NativeKeyboardView(context: Context) : LinearLayout(context) {
             "lang" -> callbacks?.onToggleLanguage()
             "emoji" -> {
                 layoutMode = KeyboardLayout.EMOJI
+                emojiSearchMode = false
                 shiftActive = false
-                renderRows()
+                refreshEmojiSearchUi(includeRows = true)
             }
             "?123" -> {
                 layoutMode = KeyboardLayout.SYMBOLS
+                symbolsPage = 0
+                emojiSearchMode = false
                 shiftActive = false
-                renderRows()
+                refreshEmojiSearchUi(includeRows = true)
             }
             "abc" -> {
                 layoutMode = KeyboardLayout.ALPHA
+                emojiSearchMode = false
                 shiftActive = false
+                refreshEmojiSearchUi(includeRows = true)
+            }
+            "emojiSearch" -> {
+                layoutMode = KeyboardLayout.EMOJI
+                emojiSearchMode = true
+                refreshEmojiSearchUi(includeRows = true)
+            }
+            "emojiSearchClose" -> {
+                emojiSearchMode = false
+                refreshEmojiSearchUi(includeRows = true)
+            }
+            "emojiSearchClear" -> {
+                emojiSearchQuery = ""
+                refreshEmojiSearchUi(includeRows = false)
+            }
+            "emojiSearchBackspace" -> {
+                if (emojiSearchQuery.isNotEmpty()) {
+                    emojiSearchQuery = emojiSearchQuery.dropLast(1)
+                    refreshEmojiSearchUi(includeRows = false)
+                }
+            }
+            "emojiSearchSpace" -> {
+                if (emojiSearchQuery.isNotEmpty() && !emojiSearchQuery.endsWith(" ")) {
+                    emojiSearchQuery += " "
+                    refreshEmojiSearchUi(includeRows = false)
+                }
+            }
+            "symPrev" -> {
+                symbolsPage = previousPage(symbolsPage, SYMBOL_PAGES.size)
+                renderRows()
+            }
+            "symNext" -> {
+                symbolsPage = nextPage(symbolsPage, SYMBOL_PAGES.size)
+                renderRows()
+            }
+            "emojiPrev" -> {
+                emojiPage = previousPage(emojiPage, emojiPageCount())
+                renderRows()
+            }
+            "emojiNext" -> {
+                emojiPage = nextPage(emojiPage, emojiPageCount())
                 renderRows()
             }
             else -> {
+                if (emojiSearchMode && key.length == 1 && key[0].lowercaseChar() in 'a'..'z') {
+                    emojiSearchQuery += key.lowercase()
+                    refreshEmojiSearchUi(includeRows = false)
+                    return
+                }
                 val output = if (shiftActive && layoutMode == KeyboardLayout.ALPHA) key.uppercase() else key
                 if (shiftActive) {
                     shiftActive = false
@@ -457,24 +567,46 @@ class NativeKeyboardView(context: Context) : LinearLayout(context) {
         }
     }
 
+    private fun refreshEmojiSearchUi(includeRows: Boolean) {
+        renderToolbar()
+        renderCandidateBar()
+        renderTopVisibility()
+        if (includeRows) renderRows()
+        renderedToolbarSignature = toolbarSignature()
+        renderedCandidateSignature = candidateSignature()
+        renderedTopVisibilitySignature = topVisibilitySignature()
+        if (includeRows) renderedKeyboardSignature = keyboardSignature()
+    }
+
     private fun keyLabel(key: String): String {
         return when (key) {
             "shift" -> if (shiftActive) "↑" else "↑"
             "backspace" -> "⌫"
             "space" -> if (state.isChinese) "空格" else "Space"
-            "enter" -> "↩"
+            "enter" -> "↵"
             "lang" -> if (state.isChinese) "中" else "EN"
             "emoji" -> "☺"
+            "emojiSearch" -> "🔎"
+            "emojiSearchClose" -> "✓"
+            "emojiSearchClear" -> "×"
+            "emojiSearchBackspace" -> "⌫"
+            "emojiSearchSpace" -> "空格"
+            "symPrev", "emojiPrev" -> "‹"
+            "symNext", "emojiNext" -> "›"
             else -> if (shiftActive && layoutMode == KeyboardLayout.ALPHA) key.uppercase() else key
         }
     }
 
     private fun keyTextSize(key: String): Float {
         return when (key) {
-            "shift", "enter" -> 26f
-            "backspace" -> 24f
+            "enter" -> 30f
+            "shift" -> 28f
+            "backspace", "emojiSearchBackspace" -> 24f
+            "emojiSearch", "emojiSearchClose", "emojiSearchClear",
+            "symPrev", "symNext", "emojiPrev", "emojiNext" -> 22f
             "space", "?123", "abc", "lang" -> 14f
-            else -> if (key.length == 1) 19f else 14f
+            "emojiSearchSpace" -> 14f
+            else -> if (isSpecialKey(key)) 14f else if (key.length == 1) 19f else 22f
         }
     }
 
@@ -513,46 +645,40 @@ class NativeKeyboardView(context: Context) : LinearLayout(context) {
                 listOf("q", "w", "e", "r", "t", "y", "u", "i", "o", "p"),
                 listOf("a", "s", "d", "f", "g", "h", "j", "k", "l"),
                 listOf("shift", "z", "x", "c", "v", "b", "n", "m", "backspace"),
-                listOf("?123", "lang", "space", "enter")
+                listOf("?123", "lang", ",", "space", ".", "enter")
             )
-            KeyboardLayout.SYMBOLS -> listOf(
-                listOf("1", "2", "3", "4", "5", "6", "7", "8", "9", "0"),
-                listOf("@", "#", "$", "%", "&", "*", "-", "+", "=", "/"),
-                listOf("(", ")", "[", "]", "{", "}", "<", ">", "_", "backspace"),
-                listOf(",", ".", "?", "!", ":", ";", "\"", "'", "\\", "|"),
-                listOf("abc", "lang", "space", "enter")
-            )
-            KeyboardLayout.EMOJI -> listOf(
-                listOf("😀", "😂", "😊", "😍", "😎", "😭", "😡", "👍"),
-                listOf("🙏", "👏", "💪", "❤️", "🔥", "✨", "🎉", "✅"),
-                listOf("🌟", "☀", "🌙", "🍎", "☕", "🚀", "💡", "backspace"),
-                listOf("abc", "?123", "lang", "space", "enter")
-            )
+            KeyboardLayout.SYMBOLS -> SYMBOL_PAGES[symbolsPage.coerceIn(0, SYMBOL_PAGES.lastIndex)]
+            KeyboardLayout.EMOJI -> if (emojiSearchMode) EMOJI_SEARCH_ROWS else emojiPageRows()
         }
     }
 
     private fun keyWeight(key: String): Float {
         return when (key) {
             "space" -> 4f
+            "emojiSearchSpace" -> 3f
+            ",", "." -> 1.1f
             "shift", "backspace", "enter" -> 1.55f
-            "emoji" -> 1.2f
+            "emoji", "emojiSearch", "emojiSearchClose", "emojiSearchClear",
+            "emojiSearchBackspace", "symPrev", "symNext", "emojiPrev", "emojiNext" -> 1.2f
             else -> 1f
         }
     }
 
     private fun keyColor(key: String): Int {
         return when (key) {
-            "shift", "backspace", "enter", "lang", "emoji", "?123", "abc" -> SPECIAL_KEY_COLOR
+            "shift", "backspace", "enter", "lang", "emoji", "?123", "abc",
+            "emojiSearch", "emojiSearchClose", "emojiSearchClear", "emojiSearchBackspace",
+            "emojiSearchSpace", "symPrev", "symNext", "emojiPrev", "emojiNext" -> SPECIAL_KEY_COLOR
             else -> Color.WHITE
         }
     }
 
     private fun keyboardSignature(): String {
-        return "${layoutMode.name}|$shiftActive|${state.isChinese}"
+        return "${layoutMode.name}|$shiftActive|${state.isChinese}|$symbolsPage|$emojiPage|$emojiSearchMode"
     }
 
     private fun toolbarSignature(): String {
-        return "${state.isChinese}|${state.recordingState}|${layoutMode.name}"
+        return "${state.recordingState}|${layoutMode.name}|$emojiSearchMode|$emojiSearchQuery"
     }
 
     private fun candidateSignature(): String {
@@ -560,6 +686,7 @@ class NativeKeyboardView(context: Context) : LinearLayout(context) {
             state.recordingState != RecordingState.IDLE -> {
                 "recording|${state.recordingState}|${state.recordingError}"
             }
+            emojiSearchMode -> "emojiSearch|$emojiSearchQuery|${emojiSearchResults().joinToString("") { it.value }}"
             !isComposing() || state.candidates.isEmpty() -> "empty|${state.isChinese}|${isComposing()}"
             else -> state.candidates.joinToString("|") { "${it.text}:${it.isAi}" }
         }
@@ -570,11 +697,46 @@ class NativeKeyboardView(context: Context) : LinearLayout(context) {
     }
 
     private fun topVisibilitySignature(): String {
-        return "${isComposing()}|${state.recordingState}"
+        return "${isComposing()}|${state.recordingState}|$emojiSearchMode"
     }
 
     private fun isComposing(): Boolean {
         return state.isChinese && state.pinyinBuffer.isNotEmpty()
+    }
+
+    private fun nextPage(current: Int, size: Int): Int {
+        return if (size <= 0) 0 else (current + 1) % size
+    }
+
+    private fun previousPage(current: Int, size: Int): Int {
+        return if (size <= 0) 0 else (current - 1 + size) % size
+    }
+
+    private fun emojiPageRows(): List<List<String>> {
+        val pageCount = emojiPageCount()
+        emojiPage = emojiPage.coerceIn(0, pageCount - 1)
+        val values = emojiEntries
+            .drop(emojiPage * EMOJI_PER_PAGE)
+            .take(EMOJI_PER_PAGE)
+            .map { it.value }
+        val rows = values.chunked(EMOJI_COLUMNS).toMutableList()
+        while (rows.size < EMOJI_RESULT_ROWS) {
+            rows.add(emptyList())
+        }
+        rows.add(listOf("abc", "?123", "emojiSearch", "emojiPrev", "space", "emojiNext", "enter"))
+        return rows
+    }
+
+    private fun emojiPageCount(): Int {
+        return maxOf(1, (emojiEntries.size + EMOJI_PER_PAGE - 1) / EMOJI_PER_PAGE)
+    }
+
+    private fun emojiSearchResults(): List<EmojiEntry> {
+        return EmojiCatalog.search(emojiEntries, emojiSearchQuery, EMOJI_SEARCH_RESULT_LIMIT)
+    }
+
+    private fun isSpecialKey(key: String): Boolean {
+        return key in SPECIAL_KEYS
     }
 
     private fun selectableBackground(color: Int, radius: Int, strokeColor: Int): RippleDrawable {
@@ -611,6 +773,57 @@ class NativeKeyboardView(context: Context) : LinearLayout(context) {
     )
 
     companion object {
+        private val SYMBOL_PAGES = listOf(
+            listOf(
+                listOf("1", "2", "3", "4", "5", "6", "7", "8", "9", "0"),
+                listOf("@", "#", "$", "%", "&", "*", "-", "+", "=", "/"),
+                listOf("(", ")", "[", "]", "{", "}", "<", ">", "_", "backspace"),
+                listOf(",", ".", "?", "!", ":", ";", "\"", "'", "\\", "|"),
+                listOf("abc", "lang", "symPrev", "space", "symNext", "enter")
+            ),
+            listOf(
+                listOf("~", "`", "^", "•", "·", "…", "、", "。", "，", "？"),
+                listOf("！", "：", "；", "“", "”", "‘", "’", "《", "》", "backspace"),
+                listOf("「", "」", "『", "』", "（", "）", "【", "】", "—", "～"),
+                listOf("￥", "$", "€", "£", "¥", "¢", "©", "®", "™", "°"),
+                listOf("abc", "lang", "symPrev", "space", "symNext", "enter")
+            ),
+            listOf(
+                listOf("±", "×", "÷", "=", "≠", "≈", "≤", "≥", "<", ">"),
+                listOf("+", "-", "*", "/", "%", "‰", "√", "∞", "∑", "backspace"),
+                listOf("←", "→", "↑", "↓", "↔", "↕", "✓", "✕", "★", "☆"),
+                listOf("■", "□", "●", "○", "◆", "◇", "▲", "△", "▼", "▽"),
+                listOf("abc", "lang", "symPrev", "space", "symNext", "enter")
+            )
+        )
+
+        private val EMOJI_SEARCH_ROWS = listOf(
+            listOf("q", "w", "e", "r", "t", "y", "u", "i", "o", "p"),
+            listOf("a", "s", "d", "f", "g", "h", "j", "k", "l"),
+            listOf("z", "x", "c", "v", "b", "n", "m", "emojiSearchBackspace"),
+            listOf("abc", "?123", "emojiSearchClear", "emojiSearchSpace", "emojiSearchClose", "enter")
+        )
+
+        private val SPECIAL_KEYS = setOf(
+            "shift",
+            "backspace",
+            "space",
+            "enter",
+            "lang",
+            "emoji",
+            "emojiSearch",
+            "emojiSearchClose",
+            "emojiSearchClear",
+            "emojiSearchBackspace",
+            "emojiSearchSpace",
+            "?123",
+            "abc",
+            "symPrev",
+            "symNext",
+            "emojiPrev",
+            "emojiNext"
+        )
+
         private const val PANEL_COLOR = 0xFFE8EAED.toInt()
         private const val TOOLBAR_COLOR = 0xFFF1F3F4.toInt()
         private const val SPECIAL_KEY_COLOR = 0xFFDADCE0.toInt()
@@ -622,5 +835,9 @@ class NativeKeyboardView(context: Context) : LinearLayout(context) {
         private const val ERROR_COLOR = 0xFFD93025.toInt()
         private const val BACKSPACE_REPEAT_START_MS = 350L
         private const val BACKSPACE_REPEAT_MS = 55L
+        private const val EMOJI_COLUMNS = 8
+        private const val EMOJI_RESULT_ROWS = 3
+        private const val EMOJI_PER_PAGE = EMOJI_COLUMNS * EMOJI_RESULT_ROWS
+        private const val EMOJI_SEARCH_RESULT_LIMIT = 80
     }
 }

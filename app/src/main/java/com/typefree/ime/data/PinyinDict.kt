@@ -16,6 +16,11 @@ class PinyinDict {
         loadDict(context)
     }
 
+    constructor(context: Context, preferenceManager: PreferenceManager) {
+        loadDict(context)
+        loadUserDict(preferenceManager.getUserPinyinEntries())
+    }
+
     internal constructor(entries: Map<String, List<String>>) {
         entries.forEach { (pinyin, words) ->
             val normalized = pinyin.trim().lowercase()
@@ -52,6 +57,46 @@ class PinyinDict {
             Log.d("PinyinDict", "Loaded ${dict.size} pinyin keys.")
         } catch (e: Exception) {
             Log.e("PinyinDict", "Failed to load pinyin dict", e)
+        }
+    }
+
+    private fun loadUserDict(entries: List<UserPinyinEntry>) {
+        entries.asReversed().forEach { entry ->
+            addEntry(entry.pinyin, entry.word, prepend = true)
+        }
+        rebuildIndex()
+    }
+
+    fun addUserEntry(pinyin: String, word: String) {
+        addEntry(pinyin, word, prepend = true)
+        rebuildIndex()
+        candidateCache.clear()
+        segmentCache.clear()
+    }
+
+    fun addUserEntries(entries: List<UserPinyinEntry>) {
+        entries.asReversed().forEach { entry ->
+            addEntry(entry.pinyin, entry.word, prepend = true)
+        }
+        rebuildIndex()
+        candidateCache.clear()
+        segmentCache.clear()
+    }
+
+    private fun addEntry(pinyin: String, word: String, prepend: Boolean) {
+        val normalizedPinyin = pinyin.lowercase()
+            .replace("'", "")
+            .replace(" ", "")
+            .trim()
+        val normalizedWord = word.trim()
+        if (normalizedPinyin.isBlank() || normalizedWord.isBlank()) return
+
+        val words = dict.getOrPut(normalizedPinyin) { mutableListOf() }
+        words.remove(normalizedWord)
+        if (prepend) {
+            words.add(0, normalizedWord)
+        } else {
+            words.add(normalizedWord)
         }
     }
 
@@ -233,5 +278,10 @@ private class SimpleLruCache<K, V>(private val maxSize: Int) {
     @Synchronized
     fun put(key: K, value: V) {
         values[key] = value
+    }
+
+    @Synchronized
+    fun clear() {
+        values.clear()
     }
 }

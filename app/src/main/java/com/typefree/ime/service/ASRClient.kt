@@ -1,12 +1,7 @@
 package com.typefree.ime.service
 
 import android.content.Context
-import android.content.Intent
 import android.media.MediaRecorder
-import android.os.Bundle
-import android.speech.RecognitionListener
-import android.speech.RecognizerIntent
-import android.speech.SpeechRecognizer
 import android.util.Log
 import com.typefree.ime.data.ProviderConfig
 import kotlinx.coroutines.Dispatchers
@@ -19,7 +14,6 @@ import okhttp3.RequestBody.Companion.asRequestBody
 import org.json.JSONObject
 import java.io.File
 import java.io.IOException
-import java.util.Locale
 import java.util.concurrent.TimeUnit
 
 class ASRClient(private val context: Context) {
@@ -30,78 +24,6 @@ class ASRClient(private val context: Context) {
 
     private var mediaRecorder: MediaRecorder? = null
     private var audioFile: File? = null
-    private var nativeSpeechRecognizer: SpeechRecognizer? = null
-
-    interface ASRListener {
-        fun onStartListening()
-        fun onResult(text: String)
-        fun onError(error: String)
-    }
-
-    fun startLocalSpeech(listener: ASRListener) {
-        if (!SpeechRecognizer.isRecognitionAvailable(context)) {
-            listener.onError("Native Speech Recognition not available on this device")
-            return
-        }
-
-        nativeSpeechRecognizer?.destroy()
-        nativeSpeechRecognizer = SpeechRecognizer.createSpeechRecognizer(context).apply {
-            setRecognitionListener(object : RecognitionListener {
-                override fun onReadyForSpeech(params: Bundle?) {
-                    listener.onStartListening()
-                }
-
-                override fun onBeginningOfSpeech() {}
-                override fun onRmsChanged(rmsdB: Float) {}
-                override fun onBufferReceived(buffer: ByteArray?) {}
-                override fun onEndOfSpeech() {}
-
-                override fun onError(error: Int) {
-                    val errorMessage = when (error) {
-                        SpeechRecognizer.ERROR_AUDIO -> "Audio recording error"
-                        SpeechRecognizer.ERROR_CLIENT -> "Client side error"
-                        SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS -> "Insufficient permissions"
-                        SpeechRecognizer.ERROR_NETWORK -> "Network error"
-                        SpeechRecognizer.ERROR_NETWORK_TIMEOUT -> "Network timeout"
-                        SpeechRecognizer.ERROR_NO_MATCH -> "No match found"
-                        SpeechRecognizer.ERROR_RECOGNIZER_BUSY -> "Speech recognition busy"
-                        SpeechRecognizer.ERROR_SERVER -> "Server error"
-                        SpeechRecognizer.ERROR_SPEECH_TIMEOUT -> "No speech input"
-                        else -> "Unknown speech error: $error"
-                    }
-                    listener.onError(errorMessage)
-                }
-
-                override fun onResults(results: Bundle?) {
-                    val matches = results?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
-                    if (!matches.isNullOrEmpty()) {
-                        listener.onResult(matches[0])
-                    } else {
-                        listener.onError("No results matched")
-                    }
-                }
-
-                override fun onPartialResults(partialResults: Bundle?) {}
-                override fun onEvent(eventType: Int, params: Bundle?) {}
-            })
-        }
-
-        val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
-            putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
-            putExtra(RecognizerIntent.EXTRA_LANGUAGE, Locale.getDefault())
-            putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, false)
-        }
-
-        try {
-            nativeSpeechRecognizer?.startListening(intent)
-        } catch (e: Exception) {
-            listener.onError("Failed to start speech recognition: ${e.message}")
-        }
-    }
-
-    fun stopLocalSpeech() {
-        nativeSpeechRecognizer?.stopListening()
-    }
 
     fun startApiRecording(): Boolean {
         try {
@@ -191,8 +113,6 @@ class ASRClient(private val context: Context) {
     }
 
     fun destroy() {
-        nativeSpeechRecognizer?.destroy()
-        nativeSpeechRecognizer = null
         mediaRecorder?.release()
         mediaRecorder = null
     }

@@ -30,6 +30,12 @@ data class ProviderCapabilities(
     val supportsAsr: Boolean = false
 )
 
+@Serializable
+data class UserPinyinEntry(
+    val pinyin: String,
+    val word: String
+)
+
 class PreferenceManager(context: Context) {
     private val json = Json { ignoreUnknownKeys = true }
 
@@ -66,6 +72,7 @@ class PreferenceManager(context: Context) {
         private const val KEY_ASR_LANGUAGE = "asr_language"
         private const val KEY_CONTEXT_PREDICTION_ENABLED = "context_prediction_enabled"
         private const val KEY_PINYIN_LLM_ENABLED = "pinyin_llm_enabled"
+        private const val KEY_USER_PINYIN_DICT = "user_pinyin_dict_v1"
 
         val DEFAULT_PROVIDERS = listOf(
             ProviderConfig(
@@ -244,7 +251,7 @@ class PreferenceManager(context: Context) {
     }
 
     fun getAsrMode(): String {
-        return plainPrefs.getString(KEY_ASR_MODE, "local") ?: "local"
+        return plainPrefs.getString(KEY_ASR_MODE, "api") ?: "api"
     }
 
     fun setAsrMode(mode: String) {
@@ -274,6 +281,123 @@ class PreferenceManager(context: Context) {
 
     fun setPinyinLlmEnabled(enabled: Boolean) {
         plainPrefs.edit().putBoolean(KEY_PINYIN_LLM_ENABLED, enabled).apply()
+    }
+
+    fun getUserPinyinEntries(): List<UserPinyinEntry> {
+        val stored = plainPrefs.getString(KEY_USER_PINYIN_DICT, null) ?: return emptyList()
+        return try {
+            normalizeUserPinyinEntries(json.decodeFromString<List<UserPinyinEntry>>(stored))
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to decode user pinyin dictionary", e)
+            emptyList()
+        }
+    }
+
+    fun saveUserPinyinEntries(entries: List<UserPinyinEntry>) {
+        plainPrefs.edit()
+            .putString(KEY_USER_PINYIN_DICT, json.encodeToString(normalizeUserPinyinEntries(entries)))
+            .apply()
+    }
+
+    fun addUserPinyinEntry(pinyin: String, word: String) {
+        val entry = normalizedUserPinyinEntry(pinyin, word) ?: return
+        addUserPinyinEntries(listOf(entry))
+    }
+
+    fun addUserPinyinEntries(entries: List<UserPinyinEntry>) {
+        val normalizedEntries = normalizeUserPinyinEntries(entries)
+        if (normalizedEntries.isEmpty()) return
+        val current = getUserPinyinEntries()
+        val incomingKeys = normalizedEntries.mapTo(LinkedHashSet()) { "${it.pinyin}\u0000${it.word}" }
+        saveUserPinyinEntries(normalizedEntries + current.filterNot {
+            "${it.pinyin}\u0000${it.word}" in incomingKeys
+        })
+    }
+
+    fun deleteUserPinyinEntry(entry: UserPinyinEntry) {
+        saveUserPinyinEntries(getUserPinyinEntries().filterNot {
+            it.pinyin == entry.pinyin && it.word == entry.word
+        })
+    }
+
+    fun importUserPinyinCsv(text: String): Int {
+        val imported = parseUserPinyinCsv(text)
+        if (imported.isEmpty()) return 0
+        saveUserPinyinEntries(imported + getUserPinyinEntries())
+        return imported.size
+    }
+
+    fun exportUserPinyinCsv(): String {
+        return getUserPinyinEntries()
+            .groupBy { it.pinyin }
+            .toSortedMap()
+            .map { (pinyin, entries) ->
+                (listOf(pinyin) + entries.map { it.word }.distinct())
+                    .joinToString(",") { escapeCsvCell(it) }
+            }
+            .joinToString("\n")
+    }
+
+    private fun normalizeUserPinyinEntries(entries: List<UserPinyinEntry>): List<UserPinyinEntry> {
+        val seen = LinkedHashSet<String>()
+        return entries.mapNotNull { normalizedUserPinyinEntry(it.pinyin, it.word) }
+            .filter { seen.add("${it.pinyin}\u0000${it.word}") }
+    }
+
+    private fun normalizedUserPinyinEntry(pinyin: String, word: String): UserPinyinEntry? {
+        val normalizedPinyin = pinyin.lowercase()
+            .replace("'", "")
+            .replace(" ", "")
+            .trim()
+        val normalizedWord = word.trim()
+        if (normalizedPinyin.isBlank() || normalizedWord.isBlank()) return null
+        if (normalizedPinyin.any { it !in 'a'..'z' }) return null
+        return UserPinyinEntry(normalizedPinyin, normalizedWord)
+    }
+
+    private fun parseUserPinyinCsv(text: String): List<UserPinyinEntry> {
+        return text.lineSequence()
+            .map { it.trim() }
+            .filter { it.isNotEmpty() && !it.startsWith("#") }
+            .flatMap { line ->
+                val cells = parseCsvLine(line)
+                val pinyin = cells.firstOrNull().orEmpty()
+                cells.drop(1).mapNotNull { word -> normalizedUserPinyinEntry(pinyin, word) }
+            }
+            .toList()
+    }
+
+    private fun parseCsvLine(line: String): List<String> {
+        val cells = mutableListOf<String>()
+        val current = StringBuilder()
+        var quoted = false
+        var index = 0
+        while (index < line.length) {
+            val char = line[index]
+            when {
+                quoted && char == '"' && line.getOrNull(index + 1) == '"' -> {
+                    current.append('"')
+                    index++
+                }
+                char == '"' -> quoted = !quoted
+                char == ',' && !quoted -> {
+                    cells.add(current.toString().trim())
+                    current.clear()
+                }
+                else -> current.append(char)
+            }
+            index++
+        }
+        cells.add(current.toString().trim())
+        return cells
+    }
+
+    private fun escapeCsvCell(value: String): String {
+        return if (value.any { it == ',' || it == '"' || it == '\n' || it == '\r' }) {
+            "\"${value.replace("\"", "\"\"")}\""
+        } else {
+            value
+        }
     }
 
     private fun defaultModelForProvider(providerId: String): String {

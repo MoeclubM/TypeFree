@@ -1,10 +1,13 @@
 package com.typefree.ime
 
+import android.net.Uri
 import android.os.Bundle
 import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.OnBackPressedCallback
+import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
@@ -59,10 +62,12 @@ import androidx.lifecycle.lifecycleScope
 import com.typefree.ime.data.PreferenceManager
 import com.typefree.ime.data.ProviderCapabilities
 import com.typefree.ime.data.ProviderConfig
+import com.typefree.ime.data.UserPinyinEntry
 import com.typefree.ime.service.LLMClient
 import com.typefree.ime.service.ProviderDetectionResult
 import com.typefree.ime.ui.TypeFreeMaterialTheme
 import kotlinx.coroutines.launch
+import java.io.OutputStreamWriter
 import java.util.Locale
 
 class SettingsActivity : ComponentActivity() {
@@ -114,6 +119,11 @@ class SettingsActivity : ComponentActivity() {
                         selectedProviderId = null
                         refreshSnapshot()
                     },
+                    onOpenLocalDictionary = {
+                        currentScreen = Screen.LOCAL_DICTIONARY
+                        selectedProviderId = null
+                        refreshSnapshot()
+                    },
                     onOpenProvider = {
                         selectedProviderId = it
                         currentScreen = Screen.PROVIDER_DETAIL
@@ -123,7 +133,11 @@ class SettingsActivity : ComponentActivity() {
                     onAddProvider = { addProvider(it) },
                     onSaveProvider = { saveProvider(it) },
                     onDeleteProvider = { deleteProvider(it) },
-                    onDetectProvider = { provider, onResult -> detectProvider(provider, onResult) }
+                    onDetectProvider = { provider, onResult -> detectProvider(provider, onResult) },
+                    onAddDictionaryEntry = { pinyin, word -> addDictionaryEntry(pinyin, word) },
+                    onDeleteDictionaryEntry = { entry -> deleteDictionaryEntry(entry) },
+                    onImportDictionary = { uri -> importDictionary(uri) },
+                    onExportDictionary = { uri -> exportDictionary(uri) }
                 )
             }
         }
@@ -132,6 +146,7 @@ class SettingsActivity : ComponentActivity() {
     private fun refreshSnapshot() {
         snapshot = SettingsSnapshot(
             providers = preferenceManager.getProviders(),
+            userPinyinEntries = preferenceManager.getUserPinyinEntries(),
             pinyinLlmEnabled = preferenceManager.isPinyinLlmEnabled(),
             contextPredictionEnabled = preferenceManager.isContextPredictionEnabled(),
             pinyinProviderId = preferenceManager.getPinyinProviderId(),
@@ -158,6 +173,10 @@ class SettingsActivity : ComponentActivity() {
                 selectedProviderId = null
                 refreshSnapshot()
             }
+            Screen.LOCAL_DICTIONARY -> {
+                currentScreen = Screen.MAIN
+                refreshSnapshot()
+            }
         }
     }
 
@@ -182,7 +201,6 @@ class SettingsActivity : ComponentActivity() {
 
     private fun saveChoice(target: ChoiceTarget, value: String) {
         when (target) {
-            ChoiceTarget.ASR_MODE -> preferenceManager.setAsrMode(value)
             ChoiceTarget.ASR_LANGUAGE -> preferenceManager.setAsrLanguage(value)
         }
         choiceDialog = null
@@ -238,6 +256,49 @@ class SettingsActivity : ComponentActivity() {
         }
     }
 
+    private fun addDictionaryEntry(pinyin: String, word: String) {
+        preferenceManager.addUserPinyinEntry(pinyin, word)
+        refreshSnapshot()
+        Toast.makeText(this, "词条已添加", Toast.LENGTH_SHORT).show()
+    }
+
+    private fun deleteDictionaryEntry(entry: UserPinyinEntry) {
+        preferenceManager.deleteUserPinyinEntry(entry)
+        refreshSnapshot()
+        Toast.makeText(this, "词条已删除", Toast.LENGTH_SHORT).show()
+    }
+
+    private fun importDictionary(uri: Uri) {
+        lifecycleScope.launch {
+            val imported = runCatching {
+                contentResolver.openInputStream(uri)?.bufferedReader()?.use { reader ->
+                    preferenceManager.importUserPinyinCsv(reader.readText())
+                } ?: 0
+            }.getOrElse {
+                Toast.makeText(this@SettingsActivity, "导入失败: ${it.message}", Toast.LENGTH_LONG).show()
+                return@launch
+            }
+            refreshSnapshot()
+            Toast.makeText(this@SettingsActivity, "已导入 $imported 条词条", Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    private fun exportDictionary(uri: Uri) {
+        lifecycleScope.launch {
+            runCatching {
+                contentResolver.openOutputStream(uri)?.use { stream ->
+                    OutputStreamWriter(stream, Charsets.UTF_8).use { writer ->
+                        writer.write(preferenceManager.exportUserPinyinCsv())
+                    }
+                }
+            }.onSuccess {
+                Toast.makeText(this@SettingsActivity, "词典已导出", Toast.LENGTH_SHORT).show()
+            }.onFailure {
+                Toast.makeText(this@SettingsActivity, "导出失败: ${it.message}", Toast.LENGTH_LONG).show()
+            }
+        }
+    }
+
 }
 
 private val TYPE_OPTIONS = listOf(
@@ -249,6 +310,7 @@ private val TYPE_OPTIONS = listOf(
 
 private data class SettingsSnapshot(
     val providers: List<ProviderConfig> = emptyList(),
+    val userPinyinEntries: List<UserPinyinEntry> = emptyList(),
     val pinyinLlmEnabled: Boolean = true,
     val contextPredictionEnabled: Boolean = true,
     val pinyinProviderId: String = "openai",
@@ -257,7 +319,7 @@ private data class SettingsSnapshot(
     val contextModelName: String = "",
     val asrProviderId: String = "openai",
     val asrModelName: String = "whisper-1",
-    val asrMode: String = "local",
+    val asrMode: String = "api",
     val asrLanguage: String = "zh"
 )
 
@@ -279,7 +341,8 @@ private data class ChoiceDialogState(
 private enum class Screen {
     MAIN,
     PROVIDERS,
-    PROVIDER_DETAIL
+    PROVIDER_DETAIL,
+    LOCAL_DICTIONARY
 }
 
 private enum class BindingTarget {
@@ -289,7 +352,6 @@ private enum class BindingTarget {
 }
 
 private enum class ChoiceTarget {
-    ASR_MODE,
     ASR_LANGUAGE
 }
 
@@ -312,13 +374,18 @@ private fun SettingsApp(
     onSelectChoice: (ChoiceTarget, String) -> Unit,
     onDismissChoice: () -> Unit,
     onOpenProviders: () -> Unit,
+    onOpenLocalDictionary: () -> Unit,
     onOpenProvider: (String) -> Unit,
     onAddProviderClick: () -> Unit,
     onDismissAddProvider: () -> Unit,
     onAddProvider: (ProviderConfig) -> Unit,
     onSaveProvider: (ProviderConfig) -> Unit,
     onDeleteProvider: (String) -> Unit,
-    onDetectProvider: (ProviderConfig, (ProviderDetectionResult) -> Unit) -> Unit
+    onDetectProvider: (ProviderConfig, (ProviderDetectionResult) -> Unit) -> Unit,
+    onAddDictionaryEntry: (String, String) -> Unit,
+    onDeleteDictionaryEntry: (UserPinyinEntry) -> Unit,
+    onImportDictionary: (Uri) -> Unit,
+    onExportDictionary: (Uri) -> Unit
 ) {
     Scaffold(
         modifier = Modifier.fillMaxSize(),
@@ -331,6 +398,7 @@ private fun SettingsApp(
                             Screen.MAIN -> "TypeFree 设置"
                             Screen.PROVIDERS -> "API 服务商"
                             Screen.PROVIDER_DETAIL -> "编辑服务商"
+                            Screen.LOCAL_DICTIONARY -> "本地词典"
                         },
                         fontWeight = FontWeight.SemiBold
                     )
@@ -361,7 +429,8 @@ private fun SettingsApp(
                 onToggleContextPrediction = onToggleContextPrediction,
                 onOpenMapping = onOpenMapping,
                 onOpenChoice = onOpenChoice,
-                onOpenProviders = onOpenProviders
+                onOpenProviders = onOpenProviders,
+                onOpenLocalDictionary = onOpenLocalDictionary
             )
             Screen.PROVIDERS -> ProvidersScreen(
                 modifier = Modifier.padding(padding),
@@ -374,6 +443,14 @@ private fun SettingsApp(
                 onSaveProvider = onSaveProvider,
                 onDeleteProvider = onDeleteProvider,
                 onDetectProvider = onDetectProvider
+            )
+            Screen.LOCAL_DICTIONARY -> LocalDictionaryScreen(
+                modifier = Modifier.padding(padding),
+                entries = snapshot.userPinyinEntries,
+                onAddEntry = onAddDictionaryEntry,
+                onDeleteEntry = onDeleteDictionaryEntry,
+                onImportDictionary = onImportDictionary,
+                onExportDictionary = onExportDictionary
             )
         }
     }
@@ -413,7 +490,8 @@ private fun SettingsMainScreen(
     onToggleContextPrediction: (Boolean) -> Unit,
     onOpenMapping: (MappingDialogState) -> Unit,
     onOpenChoice: (ChoiceDialogState) -> Unit,
-    onOpenProviders: () -> Unit
+    onOpenProviders: () -> Unit,
+    onOpenLocalDictionary: () -> Unit
 ) {
     var testText by remember { mutableStateOf("") }
 
@@ -473,37 +551,21 @@ private fun SettingsMainScreen(
                 )
             )
         }
-        if (snapshot.asrMode == "api") {
-            ClickSettingRow(
-                title = "语音识别 API 模型",
-                summary = bindingSummary(snapshot, snapshot.asrProviderId, snapshot.asrModelName)
-            ) {
-                onOpenMapping(
-                    MappingDialogState(
-                        target = BindingTarget.ASR,
-                        title = "绑定语音识别 API 模型",
-                        providerId = snapshot.asrProviderId,
-                        modelName = snapshot.asrModelName
-                    )
-                )
-            }
-        }
-
-        SectionTitle("语音识别")
         ClickSettingRow(
-            title = "语音识别模式",
-            summary = if (snapshot.asrMode == "local") "系统原生，本地识别" else "API 接口，使用网络语音服务"
+            title = "语音识别 API 模型",
+            summary = bindingSummary(snapshot, snapshot.asrProviderId, snapshot.asrModelName)
         ) {
-            onOpenChoice(
-                ChoiceDialogState(
-                    target = ChoiceTarget.ASR_MODE,
-                    title = "语音识别模式",
-                    labels = listOf("系统原生语音识别", "API 语音识别"),
-                    values = listOf("local", "api"),
-                    currentValue = snapshot.asrMode
+            onOpenMapping(
+                MappingDialogState(
+                    target = BindingTarget.ASR,
+                    title = "绑定语音识别 API 模型",
+                    providerId = snapshot.asrProviderId,
+                    modelName = snapshot.asrModelName
                 )
             )
         }
+
+        SectionTitle("语音识别")
         ClickSettingRow(
             title = "语音输入语言",
             summary = "当前识别语种: ${languageLabel(snapshot.asrLanguage)}"
@@ -526,6 +588,136 @@ private fun SettingsMainScreen(
         ) {
             onOpenProviders()
         }
+
+        SectionTitle("本地词典")
+        ClickSettingRow(
+            title = "管理本地词典",
+            summary = "${snapshot.userPinyinEntries.size} 条用户词条，可导入、导出、添加、删除"
+        ) {
+            onOpenLocalDictionary()
+        }
+    }
+}
+
+@Composable
+private fun LocalDictionaryScreen(
+    modifier: Modifier,
+    entries: List<UserPinyinEntry>,
+    onAddEntry: (String, String) -> Unit,
+    onDeleteEntry: (UserPinyinEntry) -> Unit,
+    onImportDictionary: (Uri) -> Unit,
+    onExportDictionary: (Uri) -> Unit
+) {
+    var showAddDialog by remember { mutableStateOf(false) }
+    var deletingEntry by remember { mutableStateOf<UserPinyinEntry?>(null) }
+    val importLauncher = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        if (uri != null) onImportDictionary(uri)
+    }
+    val exportLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.CreateDocument("text/csv")
+    ) { uri ->
+        if (uri != null) onExportDictionary(uri)
+    }
+
+    Column(
+        modifier = modifier
+            .verticalScroll(rememberScrollState())
+            .padding(horizontal = 18.dp, vertical = 12.dp),
+        verticalArrangement = Arrangement.spacedBy(12.dp)
+    ) {
+        Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+            Button(
+                onClick = { showAddDialog = true },
+                modifier = Modifier.weight(1f)
+            ) {
+                Text("添加")
+            }
+            Button(
+                onClick = { importLauncher.launch(arrayOf("text/*", "text/csv", "application/octet-stream")) },
+                modifier = Modifier.weight(1f)
+            ) {
+                Text("导入")
+            }
+            Button(
+                onClick = { exportLauncher.launch("typefree-user-dict.csv") },
+                modifier = Modifier.weight(1f)
+            ) {
+                Text("导出")
+            }
+        }
+
+        Text(
+            text = "格式: pinyin,词1,词2。AI 候选词只会自动学习每次生成的第一条。",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
+
+        if (entries.isEmpty()) {
+            Text(
+                text = "暂无用户词条。",
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+        } else {
+            entries
+                .groupBy { it.pinyin }
+                .toSortedMap()
+                .forEach { (pinyin, words) ->
+                    SectionTitle(pinyin)
+                    words.forEach { entry ->
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(vertical = 6.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(10.dp)
+                        ) {
+                            Text(
+                                text = entry.word,
+                                modifier = Modifier.weight(1f),
+                                style = MaterialTheme.typography.bodyLarge
+                            )
+                            TextButton(onClick = { deletingEntry = entry }) {
+                                Text("删除")
+                            }
+                        }
+                        HorizontalDivider()
+                    }
+                }
+        }
+    }
+
+    if (showAddDialog) {
+        DictionaryEntryDialog(
+            onDismiss = { showAddDialog = false },
+            onSave = { pinyin, word ->
+                onAddEntry(pinyin, word)
+                showAddDialog = false
+            }
+        )
+    }
+
+    deletingEntry?.let { entry ->
+        AlertDialog(
+            onDismissRequest = { deletingEntry = null },
+            title = { Text("删除词条") },
+            text = { Text("确定删除 ${entry.pinyin} / ${entry.word}？") },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        onDeleteEntry(entry)
+                        deletingEntry = null
+                    }
+                ) {
+                    Text("删除")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { deletingEntry = null }) {
+                    Text("取消")
+                }
+            }
+        )
     }
 }
 
@@ -1194,6 +1386,50 @@ private fun AddProviderDialog(
                 enabled = name.isNotBlank() && baseUrl.isNotBlank()
             ) {
                 Text("添加")
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) {
+                Text("取消")
+            }
+        }
+    )
+}
+
+@Composable
+private fun DictionaryEntryDialog(
+    onDismiss: () -> Unit,
+    onSave: (String, String) -> Unit
+) {
+    var pinyin by remember { mutableStateOf("") }
+    var word by remember { mutableStateOf("") }
+    val normalizedPinyin = pinyin.lowercase().filter { it in 'a'..'z' }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("添加词条") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                OutlinedTextField(
+                    value = pinyin,
+                    onValueChange = { pinyin = it },
+                    label = { Text("拼音") },
+                    singleLine = true
+                )
+                OutlinedTextField(
+                    value = word,
+                    onValueChange = { word = it },
+                    label = { Text("词语") },
+                    singleLine = true
+                )
+            }
+        },
+        confirmButton = {
+            TextButton(
+                onClick = { onSave(normalizedPinyin, word.trim()) },
+                enabled = normalizedPinyin.isNotBlank() && word.isNotBlank()
+            ) {
+                Text("保存")
             }
         },
         dismissButton = {

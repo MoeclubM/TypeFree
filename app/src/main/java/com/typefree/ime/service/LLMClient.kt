@@ -3,6 +3,7 @@ package com.typefree.ime.service
 import android.util.Log
 import com.typefree.ime.data.ProviderConfig
 import com.typefree.ime.data.ProviderCapabilities
+import com.typefree.ime.data.UserPinyinEntry
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.Json
@@ -64,6 +65,10 @@ class LLMClient {
             You are the AI candidate generator for a Simplified Chinese pinyin IME.
             Convert the current pinyin pronunciation into short Chinese word or phrase candidates.
             Use the context only to rank candidates; do not predict unrelated next text.
+            The pinyin may contain a small typing error: one wrong, missing, extra, or swapped Latin letter.
+            If the pinyin is invalid or has no obvious exact reading, infer the most likely intended pinyin and still return useful Chinese candidates.
+            Put the most likely corrected candidate first, then alternatives.
+            Do not return Latin pinyin, explanations, or the corrected pinyin string.
             Return only a JSON object with a candidates string array and no extra text.
         """.trimIndent()
         val userPrompt = """
@@ -117,6 +122,51 @@ class LLMClient {
         }
 
         return parseJsonList(rawResponse)
+    }
+
+    /**
+     * Splits a selected AI pinyin candidate into user-dictionary entries.
+     */
+    suspend fun segmentSelectedCandidate(
+        provider: ProviderConfig,
+        modelName: String,
+        sourcePinyin: String,
+        selectedText: String,
+        context: String
+    ): List<UserPinyinEntry> {
+        if (modelName.isBlank() || requiresApiKey(provider) || sourcePinyin.isBlank() || selectedText.isBlank()) {
+            return emptyList()
+        }
+
+        val systemPrompt = """
+            You are the user dictionary learner for a Simplified Chinese pinyin IME.
+            The user has selected one AI candidate. Segment only that selected text into useful dictionary entries.
+            For every entry, output the exact Chinese word from the selected text and its lowercase toneless pinyin.
+            Prefer independent words or common phrases over single characters. Include single characters only when needed.
+            Do not include punctuation, Latin text, explanations, or words that are not in the selected text.
+            Use the source pinyin as a pronunciation hint, but split it to match the selected Chinese words.
+            Return only a JSON object with a candidates string array. Each item must be exactly "pinyin<TAB>word".
+            Example: {"candidates":["nihao\t你好","shijie\t世界"]}
+        """.trimIndent()
+        val userPrompt = """
+            Text before cursor: "$context"
+            Source pinyin typed by user: "$sourcePinyin"
+            Selected AI candidate: "$selectedText"
+        """.trimIndent()
+
+        val rawResponse = try {
+            when (provider.type) {
+                "anthropic" -> callAnthropic(provider, modelName, systemPrompt, userPrompt)
+                "openai_responses" -> callOpenAiResponses(provider, modelName, systemPrompt, userPrompt)
+                "gemini" -> callGemini(provider, modelName, systemPrompt, userPrompt)
+                else -> callOpenAiChat(provider, modelName, systemPrompt, userPrompt)
+            }
+        } catch (e: Exception) {
+            logError("Error calling LLM for dictionary segmentation", e)
+            null
+        }
+
+        return parsePinyinEntryList(rawResponse)
     }
 
     suspend fun detectProvider(provider: ProviderConfig): ProviderDetectionResult = withContext(Dispatchers.IO) {
@@ -693,6 +743,60 @@ class LLMClient {
             .filter { it.isNotEmpty() }
     }
 
+    internal fun parsePinyinEntryList(rawText: String?): List<UserPinyinEntry> {
+        val seen = LinkedHashSet<String>()
+        return parseJsonList(rawText)
+            .mapNotNull { parsePinyinEntry(it) }
+            .filter { seen.add("${it.pinyin}\u0000${it.word}") }
+            .take(MAX_LEARNED_ENTRIES)
+    }
+
+    private fun parsePinyinEntry(value: String): UserPinyinEntry? {
+        val cleaned = value.trim()
+            .removePrefix("[")
+            .removeSuffix("]")
+            .trim()
+        if (cleaned.isBlank()) return null
+
+        val separators = listOf('\t', '|', ',', ':', '=')
+        for (separator in separators) {
+            val index = cleaned.indexOf(separator)
+            if (index <= 0 || index >= cleaned.lastIndex) continue
+            val left = cleaned.substring(0, index).trim()
+            val right = cleaned.substring(index + 1).trim()
+            parsePinyinWordPair(left, right)?.let { return it }
+            parsePinyinWordPair(right, left)?.let { return it }
+        }
+
+        val pinyinMatch = Regex("""[a-zA-Z' ]{1,64}""").find(cleaned) ?: return null
+        val pinyin = pinyinMatch.value
+        val word = cleaned.removeRange(pinyinMatch.range).trim()
+        return normalizedPinyinEntry(pinyin, word)
+    }
+
+    private fun parsePinyinWordPair(pinyinCandidate: String, wordCandidate: String): UserPinyinEntry? {
+        if (!looksLikePinyin(pinyinCandidate)) return null
+        return normalizedPinyinEntry(pinyinCandidate, wordCandidate)
+    }
+
+    private fun normalizedPinyinEntry(pinyin: String, word: String): UserPinyinEntry? {
+        val normalizedPinyin = pinyin.lowercase(Locale.US)
+            .replace("'", "")
+            .replace(" ", "")
+            .trim()
+        val normalizedWord = word.trim()
+        if (normalizedPinyin.isBlank() || normalizedWord.isBlank()) return null
+        if (normalizedPinyin.any { it !in 'a'..'z' }) return null
+        if (normalizedWord.any { it in 'a'..'z' || it in 'A'..'Z' }) return null
+        return UserPinyinEntry(normalizedPinyin, normalizedWord)
+    }
+
+    private fun looksLikePinyin(value: String): Boolean {
+        val normalized = value.trim()
+        return normalized.isNotBlank() && normalized.all { it.isLetter() || it == '\'' || it == ' ' } &&
+            normalized.any { it.lowercaseChar() in 'a'..'z' }
+    }
+
     private fun logError(message: String, throwable: Throwable? = null) {
         runCatching {
             if (throwable == null) {
@@ -705,5 +809,6 @@ class LLMClient {
 
     companion object {
         private const val CANDIDATE_TOOL_NAME = "emit_candidates"
+        private const val MAX_LEARNED_ENTRIES = 12
     }
 }

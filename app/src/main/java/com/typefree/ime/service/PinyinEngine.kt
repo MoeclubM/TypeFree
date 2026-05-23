@@ -12,7 +12,7 @@ data class Candidate(
 )
 
 class PinyinEngine(context: Context, private val preferenceManager: PreferenceManager) {
-    private val pinyinDict = PinyinDict(context)
+    private val pinyinDict = PinyinDict(context, preferenceManager)
     private val llmClient = LLMClient()
     
     private val scope = CoroutineScope(Dispatchers.Main + SupervisorJob())
@@ -80,7 +80,15 @@ class PinyinEngine(context: Context, private val preferenceManager: PreferenceMa
         }
     }
 
-    fun commitCandidate(candidate: Candidate): String {
+    fun commitCandidate(
+        candidate: Candidate,
+        sourcePinyin: String = "",
+        contextText: String = "",
+        learnAiSelection: Boolean = false
+    ): String {
+        if (learnAiSelection && candidate.isAi && sourcePinyin.isNotBlank()) {
+            learnSelectedAiCandidate(sourcePinyin, candidate.text, contextText)
+        }
         return candidate.text
     }
 
@@ -124,5 +132,31 @@ class PinyinEngine(context: Context, private val preferenceManager: PreferenceMa
 
     private fun emitMergedCandidates(listener: CandidateListener) {
         listener.onCandidatesUpdated((latestAiCandidates + latestLocalCandidates).distinctBy { it.text })
+    }
+
+    private fun learnSelectedAiCandidate(sourcePinyin: String, selectedText: String, contextText: String) {
+        val providerId = preferenceManager.getPinyinProviderId()
+        val provider = preferenceManager.getProvider(providerId) ?: PreferenceManager.DEFAULT_PROVIDERS.first()
+        val modelName = preferenceManager.getPinyinModelName()
+
+        scope.launch {
+            try {
+                val entries = llmClient.segmentSelectedCandidate(
+                    provider = provider,
+                    modelName = modelName,
+                    sourcePinyin = sourcePinyin,
+                    selectedText = selectedText,
+                    context = contextText
+                )
+                if (entries.isNotEmpty()) {
+                    preferenceManager.addUserPinyinEntries(entries)
+                    pinyinDict.addUserEntries(entries)
+                }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                Log.e("PinyinEngine", "LLM dictionary segmentation failed", e)
+            }
+        }
     }
 }

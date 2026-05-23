@@ -42,6 +42,22 @@ class LLMClientTest {
     }
 
     @Test
+    fun parsesSegmentedPinyinEntries() {
+        val entries = client.parsePinyinEntryList(
+            """
+            {"candidates":["nihao\t你好","shijie|世界","ceshi,测试"]}
+            """.trimIndent()
+        )
+
+        assertEquals("nihao", entries[0].pinyin)
+        assertEquals("你好", entries[0].word)
+        assertEquals("shijie", entries[1].pinyin)
+        assertEquals("世界", entries[1].word)
+        assertEquals("ceshi", entries[2].pinyin)
+        assertEquals("测试", entries[2].word)
+    }
+
+    @Test
     fun openAiResponsesBodyUsesJsonSchemaTextFormat() {
         val body = parseObject(client.buildOpenAiResponsesRequestBody("gpt5.4flash", "system", "user", 2048))
 
