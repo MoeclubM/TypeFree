@@ -121,6 +121,19 @@ class InputViewModel(
         commitCandidate(candidate)
     }
 
+    fun onPinyinClick(index: Int) {
+        val current = _pinyinBuffer.value
+        if (current.isEmpty()) return
+
+        val cutoff = if (index >= current.length) {
+            current.lastIndex
+        } else {
+            index.coerceAtLeast(0)
+        }
+        _pinyinBuffer.value = current.take(cutoff)
+        updatePinyinCandidates()
+    }
+
     fun onToggleLanguage() {
         _isChinese.value = !_isChinese.value
         _pinyinBuffer.value = ""

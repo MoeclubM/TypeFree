@@ -79,6 +79,9 @@ class TypeFreeIME : InputMethodService(),
                         })
                     }
                 }
+                override fun onPinyinClick(index: Int) = safeImeCall("pinyin click") {
+                    viewModel.onPinyinClick(index)
+                }
             }
         }
 

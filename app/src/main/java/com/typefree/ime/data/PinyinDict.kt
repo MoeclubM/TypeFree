@@ -7,6 +7,7 @@ import java.io.InputStreamReader
 
 class PinyinDict {
     private val dict = HashMap<String, MutableList<String>>()
+    private var sortedKeys: List<String> = emptyList()
 
     private val segmentCache = SimpleLruCache<String, List<String>>(SEGMENT_CACHE_SIZE)
     private val candidateCache = SimpleLruCache<String, List<String>>(CANDIDATE_CACHE_SIZE)
@@ -22,6 +23,7 @@ class PinyinDict {
                 dict[normalized] = words.map { it.trim() }.filter { it.isNotEmpty() }.toMutableList()
             }
         }
+        rebuildIndex()
     }
 
     private fun loadDict(context: Context) {
@@ -46,6 +48,7 @@ class PinyinDict {
                 line = reader.readLine()
             }
             reader.close()
+            rebuildIndex()
             Log.d("PinyinDict", "Loaded ${dict.size} pinyin keys.")
         } catch (e: Exception) {
             Log.e("PinyinDict", "Failed to load pinyin dict", e)
@@ -100,14 +103,77 @@ class PinyinDict {
             }
         }
 
+        candidates.addAll(prefixCompletionCandidates(clean))
+
         if (clean.length == 1) {
-            val matches = dict.keys.filter { it.startsWith(clean) && it.length > 1 }
+            val matches = sortedKeys.filter { it.startsWith(clean) && it.length > 1 }
                 .flatMap { dict[it] ?: emptyList() }
                 .take(10)
             candidates.addAll(matches)
         }
 
         return candidates.distinct().take(MAX_CANDIDATES)
+    }
+
+    private fun prefixCompletionCandidates(input: String): List<String> {
+        val exactSegments = mutableListOf<String>()
+        var index = 0
+
+        while (index < input.length) {
+            var exact: String? = null
+            for (width in minOf(6, input.length - index) downTo 1) {
+                val sub = input.substring(index, index + width)
+                if (dict.containsKey(sub)) {
+                    exact = sub
+                    break
+                }
+            }
+            if (exact == null) break
+            exactSegments.add(exact)
+            index += exact.length
+        }
+
+        val prefix = input.substring(index)
+        if (prefix.isEmpty()) return emptyList()
+
+        val prefixWords = sortedKeys
+            .asSequence()
+            .filter { pinyin ->
+                pinyin.startsWith(prefix) &&
+                    pinyin.length > prefix.length &&
+                    dict[pinyin].orEmpty().isNotEmpty()
+            }
+            .take(PREFIX_KEY_LIMIT)
+            .flatMap { dict[it].orEmpty().asSequence().take(PART_CANDIDATE_LIMIT) }
+            .toList()
+
+        if (prefixWords.isEmpty()) return emptyList()
+        if (exactSegments.isEmpty()) return prefixWords.take(PREFIX_WORD_LIMIT)
+
+        val exactCandidates = exactSegments.map { dict[it].orEmpty().take(PART_CANDIDATE_LIMIT) }
+        if (exactCandidates.any { it.isEmpty() }) return emptyList()
+
+        var composed = exactCandidates.first()
+        for (i in 1 until exactCandidates.size) {
+            val next = mutableListOf<String>()
+            for (left in composed) {
+                for (right in exactCandidates[i]) {
+                    next.add(left + right)
+                    if (next.size >= MAX_COMPOSED_CANDIDATES) break
+                }
+                if (next.size >= MAX_COMPOSED_CANDIDATES) break
+            }
+            composed = next
+        }
+
+        val result = mutableListOf<String>()
+        for (left in composed) {
+            for (right in prefixWords) {
+                result.add(left + right)
+                if (result.size >= MAX_COMPOSED_CANDIDATES) return result
+            }
+        }
+        return result
     }
 
     private fun segmentPinyin(input: String): List<String> {
@@ -138,10 +204,16 @@ class PinyinDict {
         return result
     }
 
+    private fun rebuildIndex() {
+        sortedKeys = dict.keys.sortedWith(compareBy<String> { it.length }.thenBy { it })
+    }
+
     companion object {
         private const val SEGMENT_CACHE_SIZE = 512
         private const val CANDIDATE_CACHE_SIZE = 1024
         private const val PART_CANDIDATE_LIMIT = 4
+        private const val PREFIX_KEY_LIMIT = 24
+        private const val PREFIX_WORD_LIMIT = 20
         private const val MAX_COMPOSED_SEGMENTS = 6
         private const val MAX_COMPOSED_CANDIDATES = 32
         private const val MAX_CANDIDATES = 40

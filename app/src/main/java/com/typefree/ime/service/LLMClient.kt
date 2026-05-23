@@ -538,23 +538,34 @@ class LLMClient {
                 return ProviderDetectionResult(provider.models, provider.capabilities, "Model detection failed: HTTP ${response.code}")
             }
             val body = response.body?.string().orEmpty()
-            val models = runCatching {
-                json.parseToJsonElement(body)
-                    .jsonObject["data"]
-                    ?.jsonArray
-                    ?.mapNotNull { it.jsonObject["id"]?.jsonPrimitive?.contentOrNull }
-                    .orEmpty()
-            }.getOrDefault(emptyList())
-
-            val capabilities = provider.capabilities.copy(
-                supportsModelList = true,
-                supportsStructuredOutput = true,
-                supportsToolCalling = true,
-                supportsThinkingBudget = provider.type == "openai_responses" || provider.name.contains("DeepSeek", ignoreCase = true),
-                supportsAsr = provider.name.contains("OpenAI", ignoreCase = true)
-            )
+            val models = parseOpenAiModelsResponse(body)
+            val capabilities = openAiCompatibleCapabilities(provider)
             return ProviderDetectionResult(models.ifEmpty { provider.models }, capabilities, "Detected ${models.size} model(s).")
         }
+    }
+
+    internal fun parseOpenAiModelsResponse(body: String): List<String> {
+        return runCatching {
+            json.parseToJsonElement(body)
+                .jsonObject["data"]
+                ?.jsonArray
+                ?.mapNotNull { it.jsonObject["id"]?.jsonPrimitive?.contentOrNull }
+                .orEmpty()
+        }.getOrDefault(emptyList())
+    }
+
+    internal fun openAiCompatibleCapabilities(provider: ProviderConfig): ProviderCapabilities {
+        return provider.capabilities.copy(
+            supportsModelList = true,
+            supportsStructuredOutput = true,
+            supportsToolCalling = true,
+            supportsThinkingBudget = provider.capabilities.supportsThinkingBudget ||
+                provider.type == "openai_responses" ||
+                provider.name.contains("OpenAI", ignoreCase = true) ||
+                provider.name.contains("DeepSeek", ignoreCase = true),
+            supportsAsr = provider.capabilities.supportsAsr ||
+                provider.name.contains("OpenAI", ignoreCase = true)
+        )
     }
 
     private fun detectGemini(provider: ProviderConfig): ProviderDetectionResult {
@@ -570,20 +581,7 @@ class LLMClient {
                 return ProviderDetectionResult(provider.models, provider.capabilities, "Gemini detection failed: HTTP ${response.code}")
             }
             val body = response.body?.string().orEmpty()
-            val parsedModels = runCatching {
-                json.parseToJsonElement(body)
-                    .jsonObject["models"]
-                    ?.jsonArray
-                    ?.mapNotNull { model ->
-                        val obj = model.jsonObject
-                        val name = obj["name"]?.jsonPrimitive?.contentOrNull?.removePrefix("models/")
-                        val methods = obj["supportedGenerationMethods"]?.jsonArray?.mapNotNull {
-                            it.jsonPrimitive.contentOrNull
-                        }.orEmpty()
-                        if (name != null && "generateContent" in methods) name else null
-                    }
-                    .orEmpty()
-            }.getOrDefault(emptyList())
+            val parsedModels = parseGeminiModelsResponse(body)
 
             return ProviderDetectionResult(
                 models = parsedModels.ifEmpty { provider.models },
@@ -597,6 +595,23 @@ class LLMClient {
                 message = "Detected ${parsedModels.size} Gemini generateContent model(s)."
             )
         }
+    }
+
+    internal fun parseGeminiModelsResponse(body: String): List<String> {
+        return runCatching {
+            json.parseToJsonElement(body)
+                .jsonObject["models"]
+                ?.jsonArray
+                ?.mapNotNull { model ->
+                    val obj = model.jsonObject
+                    val name = obj["name"]?.jsonPrimitive?.contentOrNull?.removePrefix("models/")
+                    val methods = obj["supportedGenerationMethods"]?.jsonArray?.mapNotNull {
+                        it.jsonPrimitive.contentOrNull
+                    }.orEmpty()
+                    if (name != null && "generateContent" in methods) name else null
+                }
+                .orEmpty()
+        }.getOrDefault(emptyList())
     }
 
     /**

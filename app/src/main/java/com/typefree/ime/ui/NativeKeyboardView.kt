@@ -17,6 +17,8 @@ import android.view.View
 import android.widget.HorizontalScrollView
 import android.widget.LinearLayout
 import android.widget.TextView
+import androidx.core.view.ViewCompat
+import androidx.core.view.WindowInsetsCompat
 import com.typefree.ime.service.Candidate
 
 class NativeKeyboardView(context: Context) : LinearLayout(context) {
@@ -29,6 +31,7 @@ class NativeKeyboardView(context: Context) : LinearLayout(context) {
         fun onToggleLanguage()
         fun onMicClick()
         fun onSettingsClick()
+        fun onPinyinClick(index: Int)
     }
 
     data class State(
@@ -47,6 +50,7 @@ class NativeKeyboardView(context: Context) : LinearLayout(context) {
     private var renderedToolbarSignature = ""
     private var renderedCandidateSignature = ""
     private var renderedPinyinSignature = ""
+    private var renderedTopVisibilitySignature = ""
     private var renderedKeyboardSignature = ""
     private val keyTargets = mutableListOf<KeyTouchTarget>()
     private val activePointers = mutableMapOf<Int, KeyTouchTarget>()
@@ -67,22 +71,28 @@ class NativeKeyboardView(context: Context) : LinearLayout(context) {
     private val candidateHost = LinearLayout(context)
     private val pinyinText = TextView(context)
     private val rowsHost = LinearLayout(context)
+    private val baseHorizontalPadding = dp(6)
+    private val baseTopPadding = dp(6)
+    private val baseBottomPadding = dp(8)
 
     init {
         orientation = VERTICAL
         setBackgroundColor(PANEL_COLOR)
-        setPadding(dp(6), dp(6), dp(6), dp(8))
+        setPadding(baseHorizontalPadding, baseTopPadding, baseHorizontalPadding, baseBottomPadding)
+        ViewCompat.setOnApplyWindowInsetsListener(this) { view, insets ->
+            val bottomInset = insets.getInsets(WindowInsetsCompat.Type.systemBars()).bottom
+            view.setPadding(
+                baseHorizontalPadding,
+                baseTopPadding,
+                baseHorizontalPadding,
+                baseBottomPadding + bottomInset
+            )
+            insets
+        }
 
         addView(
             toolbarHost,
-            LayoutParams(LayoutParams.MATCH_PARENT, dp(38)).apply {
-                bottomMargin = dp(4)
-            }
-        )
-
-        addView(
-            candidateHost,
-            LayoutParams(LayoutParams.MATCH_PARENT, dp(44)).apply {
+            LayoutParams(LayoutParams.MATCH_PARENT, dp(42)).apply {
                 bottomMargin = dp(4)
             }
         )
@@ -94,12 +104,42 @@ class NativeKeyboardView(context: Context) : LinearLayout(context) {
         pinyinText.setPadding(dp(10), 0, dp(10), 0)
         pinyinText.isSingleLine = true
         pinyinText.ellipsize = TextUtils.TruncateAt.START
-        pinyinText.visibility = INVISIBLE
-        pinyinText.background = roundedBackground(Color.WHITE, dp(10), BORDER_COLOR)
+        pinyinText.visibility = GONE
+        pinyinText.isClickable = true
+        pinyinText.background = selectableBackground(Color.WHITE, dp(10), BORDER_COLOR)
+        pinyinText.setOnTouchListener { _, event ->
+            when (event.actionMasked) {
+                MotionEvent.ACTION_DOWN -> {
+                    pinyinText.isPressed = true
+                    true
+                }
+                MotionEvent.ACTION_UP -> {
+                    pinyinText.isPressed = false
+                    performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
+                    val offset = pinyinText.getOffsetForPosition(event.x, event.y)
+                        .coerceIn(0, state.pinyinBuffer.length)
+                    callbacks?.onPinyinClick(offset)
+                    true
+                }
+                MotionEvent.ACTION_CANCEL -> {
+                    pinyinText.isPressed = false
+                    true
+                }
+                else -> true
+            }
+        }
         addView(
             pinyinText,
             LayoutParams(LayoutParams.MATCH_PARENT, dp(34)).apply {
-                bottomMargin = dp(5)
+                bottomMargin = dp(4)
+            }
+        )
+
+        candidateHost.visibility = GONE
+        addView(
+            candidateHost,
+            LayoutParams(LayoutParams.MATCH_PARENT, dp(44)).apply {
+                bottomMargin = dp(4)
             }
         )
 
@@ -138,6 +178,12 @@ class NativeKeyboardView(context: Context) : LinearLayout(context) {
             renderedPinyinSignature = pinyinSignature
         }
 
+        val topVisibilitySignature = topVisibilitySignature()
+        if (renderedTopVisibilitySignature != topVisibilitySignature) {
+            renderTopVisibility()
+            renderedTopVisibilitySignature = topVisibilitySignature
+        }
+
         if (renderedKeyboardSignature != keyboardSignature()) {
             renderRows()
         }
@@ -150,15 +196,22 @@ class NativeKeyboardView(context: Context) : LinearLayout(context) {
         toolbarHost.background = roundedBackground(TOOLBAR_COLOR, dp(10), BORDER_COLOR)
         toolbarHost.setPadding(dp(6), 0, dp(6), 0)
 
-        val title = statusText(if (state.isChinese) "中文拼音" else "English", MUTED_TEXT_COLOR).apply {
+        val title = statusText(if (state.isChinese) "中文" else "English", MUTED_TEXT_COLOR).apply {
             textSize = 13f
         }
         toolbarHost.addView(title, LayoutParams(0, LayoutParams.MATCH_PARENT, 1f))
 
-        toolbarHost.addView(toolbarButton("Mic", isActive = state.recordingState == RecordingState.RECORDING) {
+        toolbarHost.addView(toolbarButton("☺", isActive = layoutMode == KeyboardLayout.EMOJI) {
+            layoutMode = KeyboardLayout.EMOJI
+            shiftActive = false
+            renderRows()
+            renderToolbar()
+            renderedToolbarSignature = toolbarSignature()
+        })
+        toolbarHost.addView(toolbarButton("🎙", isActive = state.recordingState == RecordingState.RECORDING) {
             callbacks?.onMicClick()
         })
-        toolbarHost.addView(toolbarButton("设置", isActive = false) {
+        toolbarHost.addView(toolbarButton("⚙", isActive = false) {
             callbacks?.onSettingsClick()
         })
     }
@@ -175,7 +228,7 @@ class NativeKeyboardView(context: Context) : LinearLayout(context) {
                 candidateHost.gravity = Gravity.CENTER
                 candidateHost.addView(statusText(recordingMessage(), recordingColor()))
             }
-            state.candidates.isNotEmpty() -> {
+            isComposing() && state.candidates.isNotEmpty() -> {
                 val scrollView = HorizontalScrollView(context).apply {
                     isHorizontalScrollBarEnabled = false
                     overScrollMode = OVER_SCROLL_NEVER
@@ -207,9 +260,14 @@ class NativeKeyboardView(context: Context) : LinearLayout(context) {
     }
 
     private fun renderPinyinBuffer() {
-        val visible = state.isChinese && state.pinyinBuffer.isNotEmpty()
-        pinyinText.visibility = if (visible) VISIBLE else INVISIBLE
-        pinyinText.text = if (visible) state.pinyinBuffer else ""
+        pinyinText.text = state.pinyinBuffer
+    }
+
+    private fun renderTopVisibility() {
+        val composing = isComposing()
+        toolbarHost.visibility = if (composing) GONE else VISIBLE
+        pinyinText.visibility = if (composing) VISIBLE else GONE
+        candidateHost.visibility = if (composing || state.recordingState != RecordingState.IDLE) VISIBLE else GONE
     }
 
     private fun renderRows() {
@@ -257,7 +315,7 @@ class NativeKeyboardView(context: Context) : LinearLayout(context) {
     private fun keyView(key: String): TextView {
         return TextView(context).apply {
             text = keyLabel(key)
-            textSize = if (key.length == 1) 19f else 14f
+            textSize = keyTextSize(key)
             typeface = if (key.length == 1) Typeface.DEFAULT else Typeface.DEFAULT_BOLD
             setTextColor(TEXT_COLOR)
             gravity = Gravity.CENTER
@@ -327,6 +385,7 @@ class NativeKeyboardView(context: Context) : LinearLayout(context) {
         return keyTargets.firstOrNull { target ->
             targetRect.set(0, 0, target.view.width, target.view.height)
             rowsHost.offsetDescendantRectToMyCoords(target.view, targetRect)
+            targetRect.inset(-dp(2), -dp(2))
             targetRect.contains(touchX, touchY)
         }
     }
@@ -339,15 +398,15 @@ class NativeKeyboardView(context: Context) : LinearLayout(context) {
             setTextColor(if (isActive) Color.WHITE else TEXT_COLOR)
             gravity = Gravity.CENTER
             includeFontPadding = false
-            minWidth = dp(58)
-            background = selectableBackground(if (isActive) ACCENT_COLOR else Color.WHITE, dp(8), BORDER_COLOR)
+            minWidth = dp(34)
+            background = selectableBackground(if (isActive) ACCENT_COLOR else Color.WHITE, dp(17), BORDER_COLOR)
             setOnClickListener {
                 performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
                 action()
             }
         }.also {
-            it.layoutParams = LayoutParams(LayoutParams.WRAP_CONTENT, dp(30)).apply {
-                leftMargin = dp(4)
+            it.layoutParams = LayoutParams(dp(34), dp(34)).apply {
+                leftMargin = dp(6)
             }
         }
     }
@@ -400,13 +459,22 @@ class NativeKeyboardView(context: Context) : LinearLayout(context) {
 
     private fun keyLabel(key: String): String {
         return when (key) {
-            "shift" -> if (shiftActive) "⇧" else "⇧"
+            "shift" -> if (shiftActive) "↑" else "↑"
             "backspace" -> "⌫"
             "space" -> if (state.isChinese) "空格" else "Space"
-            "enter" -> "↵"
+            "enter" -> "↩"
             "lang" -> if (state.isChinese) "中" else "EN"
             "emoji" -> "☺"
             else -> if (shiftActive && layoutMode == KeyboardLayout.ALPHA) key.uppercase() else key
+        }
+    }
+
+    private fun keyTextSize(key: String): Float {
+        return when (key) {
+            "shift", "enter" -> 26f
+            "backspace" -> 24f
+            "space", "?123", "abc", "lang" -> 14f
+            else -> if (key.length == 1) 19f else 14f
         }
     }
 
@@ -445,14 +513,14 @@ class NativeKeyboardView(context: Context) : LinearLayout(context) {
                 listOf("q", "w", "e", "r", "t", "y", "u", "i", "o", "p"),
                 listOf("a", "s", "d", "f", "g", "h", "j", "k", "l"),
                 listOf("shift", "z", "x", "c", "v", "b", "n", "m", "backspace"),
-                listOf("?123", "lang", "emoji", "space", "enter")
+                listOf("?123", "lang", "space", "enter")
             )
             KeyboardLayout.SYMBOLS -> listOf(
                 listOf("1", "2", "3", "4", "5", "6", "7", "8", "9", "0"),
                 listOf("@", "#", "$", "%", "&", "*", "-", "+", "=", "/"),
                 listOf("(", ")", "[", "]", "{", "}", "<", ">", "_", "backspace"),
                 listOf(",", ".", "?", "!", ":", ";", "\"", "'", "\\", "|"),
-                listOf("abc", "lang", "emoji", "space", "enter")
+                listOf("abc", "lang", "space", "enter")
             )
             KeyboardLayout.EMOJI -> listOf(
                 listOf("😀", "😂", "😊", "😍", "😎", "😭", "😡", "👍"),
@@ -484,7 +552,7 @@ class NativeKeyboardView(context: Context) : LinearLayout(context) {
     }
 
     private fun toolbarSignature(): String {
-        return "${state.isChinese}|${state.recordingState}"
+        return "${state.isChinese}|${state.recordingState}|${layoutMode.name}"
     }
 
     private fun candidateSignature(): String {
@@ -492,13 +560,21 @@ class NativeKeyboardView(context: Context) : LinearLayout(context) {
             state.recordingState != RecordingState.IDLE -> {
                 "recording|${state.recordingState}|${state.recordingError}"
             }
-            state.candidates.isEmpty() -> "empty|${state.isChinese}"
+            !isComposing() || state.candidates.isEmpty() -> "empty|${state.isChinese}|${isComposing()}"
             else -> state.candidates.joinToString("|") { "${it.text}:${it.isAi}" }
         }
     }
 
     private fun pinyinSignature(): String {
         return "${state.isChinese}|${state.pinyinBuffer}"
+    }
+
+    private fun topVisibilitySignature(): String {
+        return "${isComposing()}|${state.recordingState}"
+    }
+
+    private fun isComposing(): Boolean {
+        return state.isChinese && state.pinyinBuffer.isNotEmpty()
     }
 
     private fun selectableBackground(color: Int, radius: Int, strokeColor: Int): RippleDrawable {

@@ -8,6 +8,7 @@ import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
+import com.typefree.ime.data.ProviderConfig
 
 class LLMClientTest {
     private val client = LLMClient()
@@ -93,6 +94,48 @@ class LLMClientTest {
                 ?.content
         )
         assertEquals("512", generationConfig?.get("thinkingConfig")?.jsonObject?.get("thinkingBudget")?.jsonPrimitive?.content)
+    }
+
+    @Test
+    fun parsesOpenAiCompatibleModelList() {
+        val models = client.parseOpenAiModelsResponse(
+            """
+            {"data":[{"id":"gpt5.4flash"},{"id":"other-model"}]}
+            """.trimIndent()
+        )
+
+        assertEquals(listOf("gpt5.4flash", "other-model"), models)
+    }
+
+    @Test
+    fun parsesGeminiGenerateContentModelsOnly() {
+        val models = client.parseGeminiModelsResponse(
+            """
+            {
+              "models": [
+                {"name":"models/gemini-flash","supportedGenerationMethods":["generateContent"]},
+                {"name":"models/embedder","supportedGenerationMethods":["embedContent"]}
+              ]
+            }
+            """.trimIndent()
+        )
+
+        assertEquals(listOf("gemini-flash"), models)
+    }
+
+    @Test
+    fun openAiCompatibleCapabilitiesDetectThinkingForOpenAiAndDeepSeek() {
+        val openAi = client.openAiCompatibleCapabilities(
+            ProviderConfig(id = "openai", name = "OpenAI", type = "openai")
+        )
+        val deepSeek = client.openAiCompatibleCapabilities(
+            ProviderConfig(id = "deepseek", name = "DeepSeek", type = "openai")
+        )
+
+        assertTrue(openAi.supportsThinkingBudget)
+        assertTrue(openAi.supportsAsr)
+        assertTrue(deepSeek.supportsThinkingBudget)
+        assertFalse(deepSeek.supportsAsr)
     }
 
     private fun parseObject(value: String) = json.parseToJsonElement(value).jsonObject
