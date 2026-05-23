@@ -56,6 +56,24 @@ class PinyinDictTest {
     }
 
     @Test
+    fun completesPartialTrailingSyllableFromDictionaryDataOnly() {
+        val genericDict = PinyinDict(
+            mapOf(
+                "wo" to listOf("我"),
+                "men" to listOf("们"),
+                "shi" to listOf("世"),
+                "jie" to listOf("界"),
+                "kuai" to listOf("快"),
+                "le" to listOf("乐")
+            )
+        )
+
+        assertTrue(genericDict.getCandidates("wom").contains("我们"))
+        assertTrue(genericDict.getCandidates("shij").contains("世界"))
+        assertTrue(genericDict.getCandidates("kuail").contains("快乐"))
+    }
+
+    @Test
     fun capsLongComposedPinyinCandidateExplosion() {
         val longInput = "nihao".repeat(20)
         val candidates = dict.getCandidates(longInput)
