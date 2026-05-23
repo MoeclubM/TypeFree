@@ -3,6 +3,7 @@ package com.typefree.ime.ui
 import android.content.Context
 import android.content.res.ColorStateList
 import android.graphics.Color
+import android.graphics.Rect
 import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
 import android.graphics.drawable.RippleDrawable
@@ -47,6 +48,10 @@ class NativeKeyboardView(context: Context) : LinearLayout(context) {
     private var renderedCandidateSignature = ""
     private var renderedPinyinSignature = ""
     private var renderedKeyboardSignature = ""
+    private val keyTargets = mutableListOf<KeyTouchTarget>()
+    private val activePointers = mutableMapOf<Int, KeyTouchTarget>()
+    private val activeBackspacePointers = mutableSetOf<Int>()
+    private val targetRect = Rect()
 
     private val repeatHandler = Handler(Looper.getMainLooper())
     private var repeatingBackspace = false
@@ -99,12 +104,16 @@ class NativeKeyboardView(context: Context) : LinearLayout(context) {
         )
 
         rowsHost.orientation = VERTICAL
+        rowsHost.isClickable = true
+        rowsHost.setMotionEventSplittingEnabled(true)
+        rowsHost.setOnTouchListener { _, event -> handleKeyboardTouch(event) }
         addView(rowsHost, LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT))
 
         render(state)
     }
 
     override fun onDetachedFromWindow() {
+        cancelActivePointers()
         stopBackspaceRepeat()
         super.onDetachedFromWindow()
     }
@@ -205,13 +214,16 @@ class NativeKeyboardView(context: Context) : LinearLayout(context) {
 
     private fun renderRows() {
         rowsHost.removeAllViews()
+        keyTargets.clear()
         activeRows().forEach { row ->
             val rowView = LinearLayout(context).apply {
                 orientation = HORIZONTAL
                 gravity = Gravity.CENTER
             }
             row.forEach { key ->
-                rowView.addView(keyView(key), LayoutParams(0, dp(44), keyWeight(key)).apply {
+                val keyView = keyView(key)
+                keyTargets.add(KeyTouchTarget(key, keyView))
+                rowView.addView(keyView, LayoutParams(0, dp(44), keyWeight(key)).apply {
                     leftMargin = dp(2)
                     rightMargin = dp(2)
                 })
@@ -249,34 +261,73 @@ class NativeKeyboardView(context: Context) : LinearLayout(context) {
             typeface = if (key.length == 1) Typeface.DEFAULT else Typeface.DEFAULT_BOLD
             setTextColor(TEXT_COLOR)
             gravity = Gravity.CENTER
-            isClickable = true
+            isClickable = false
             isFocusable = false
             includeFontPadding = false
             background = selectableBackground(keyColor(key), dp(8), BORDER_COLOR)
-            if (key == "backspace") {
-                setOnTouchListener { view, event ->
-                    when (event.actionMasked) {
-                        MotionEvent.ACTION_DOWN -> {
-                            view.isPressed = true
-                            performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
-                            callbacks?.onBackspace()
-                            startBackspaceRepeat()
-                            true
-                        }
-                        MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
-                            view.isPressed = false
-                            stopBackspaceRepeat()
-                            true
-                        }
-                        else -> true
-                    }
-                }
-            } else {
-                setOnClickListener {
-                    performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
-                    handleKey(key)
-                }
+        }
+    }
+
+    private fun handleKeyboardTouch(event: MotionEvent): Boolean {
+        when (event.actionMasked) {
+            MotionEvent.ACTION_DOWN,
+            MotionEvent.ACTION_POINTER_DOWN -> handlePointerDown(event, event.actionIndex)
+
+            MotionEvent.ACTION_UP,
+            MotionEvent.ACTION_POINTER_UP -> handlePointerUp(event, event.actionIndex)
+
+            MotionEvent.ACTION_CANCEL -> cancelActivePointers()
+        }
+        return true
+    }
+
+    private fun handlePointerDown(event: MotionEvent, pointerIndex: Int) {
+        val target = findKeyTarget(event.getX(pointerIndex), event.getY(pointerIndex)) ?: return
+        val pointerId = event.getPointerId(pointerIndex)
+        activePointers[pointerId] = target
+        target.view.isPressed = true
+        target.view.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
+
+        if (target.key == "backspace") {
+            activeBackspacePointers.add(pointerId)
+            callbacks?.onBackspace()
+            if (activeBackspacePointers.size == 1) {
+                startBackspaceRepeat()
             }
+        }
+    }
+
+    private fun handlePointerUp(event: MotionEvent, pointerIndex: Int) {
+        val pointerId = event.getPointerId(pointerIndex)
+        val target = activePointers.remove(pointerId) ?: return
+
+        target.view.isPressed = activePointers.values.any { it.view == target.view }
+
+        if (target.key == "backspace") {
+            activeBackspacePointers.remove(pointerId)
+            if (activeBackspacePointers.isEmpty()) {
+                stopBackspaceRepeat()
+            }
+            return
+        }
+
+        handleKey(target.key)
+    }
+
+    private fun cancelActivePointers() {
+        activePointers.values.forEach { it.view.isPressed = false }
+        activePointers.clear()
+        activeBackspacePointers.clear()
+        stopBackspaceRepeat()
+    }
+
+    private fun findKeyTarget(x: Float, y: Float): KeyTouchTarget? {
+        val touchX = x.toInt()
+        val touchY = y.toInt()
+        return keyTargets.firstOrNull { target ->
+            targetRect.set(0, 0, target.view.width, target.view.height)
+            rowsHost.offsetDescendantRectToMyCoords(target.view, targetRect)
+            targetRect.contains(touchX, touchY)
         }
     }
 
@@ -477,6 +528,11 @@ class NativeKeyboardView(context: Context) : LinearLayout(context) {
         SYMBOLS,
         EMOJI
     }
+
+    private data class KeyTouchTarget(
+        val key: String,
+        val view: TextView
+    )
 
     companion object {
         private const val PANEL_COLOR = 0xFFE8EAED.toInt()
