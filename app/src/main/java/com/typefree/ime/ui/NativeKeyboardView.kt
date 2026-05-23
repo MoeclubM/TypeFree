@@ -6,8 +6,11 @@ import android.graphics.Color
 import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
 import android.graphics.drawable.RippleDrawable
+import android.os.Handler
+import android.os.Looper
 import android.view.Gravity
 import android.view.HapticFeedbackConstants
+import android.view.MotionEvent
 import android.view.View
 import android.widget.HorizontalScrollView
 import android.widget.LinearLayout
@@ -39,7 +42,19 @@ class NativeKeyboardView(context: Context) : LinearLayout(context) {
     private var layoutMode = KeyboardLayout.ALPHA
     private var shiftActive = false
     private var state = State("", emptyList(), true, RecordingState.IDLE, "")
+    private var renderedKeyboardSignature = ""
 
+    private val repeatHandler = Handler(Looper.getMainLooper())
+    private var repeatingBackspace = false
+    private val repeatBackspaceRunnable = object : Runnable {
+        override fun run() {
+            if (!repeatingBackspace) return
+            callbacks?.onBackspace()
+            repeatHandler.postDelayed(this, BACKSPACE_REPEAT_MS)
+        }
+    }
+
+    private val toolbarHost = LinearLayout(context)
     private val candidateHost = LinearLayout(context)
     private val pinyinText = TextView(context)
     private val rowsHost = LinearLayout(context)
@@ -48,6 +63,13 @@ class NativeKeyboardView(context: Context) : LinearLayout(context) {
         orientation = VERTICAL
         setBackgroundColor(PANEL_COLOR)
         setPadding(dp(6), dp(6), dp(6), dp(8))
+
+        addView(
+            toolbarHost,
+            LayoutParams(LayoutParams.MATCH_PARENT, dp(38)).apply {
+                bottomMargin = dp(4)
+            }
+        )
 
         addView(
             candidateHost,
@@ -76,11 +98,40 @@ class NativeKeyboardView(context: Context) : LinearLayout(context) {
         render(state)
     }
 
+    override fun onDetachedFromWindow() {
+        stopBackspaceRepeat()
+        super.onDetachedFromWindow()
+    }
+
     fun render(nextState: State) {
+        val oldKeyboardSignature = keyboardSignature()
         state = nextState
+        renderToolbar()
         renderCandidateBar()
         renderPinyinBuffer()
-        renderRows()
+        if (renderedKeyboardSignature != oldKeyboardSignature || renderedKeyboardSignature != keyboardSignature()) {
+            renderRows()
+        }
+    }
+
+    private fun renderToolbar() {
+        toolbarHost.removeAllViews()
+        toolbarHost.orientation = HORIZONTAL
+        toolbarHost.gravity = Gravity.CENTER_VERTICAL
+        toolbarHost.background = roundedBackground(TOOLBAR_COLOR, dp(10), BORDER_COLOR)
+        toolbarHost.setPadding(dp(6), 0, dp(6), 0)
+
+        val title = statusText(if (state.isChinese) "中文拼音" else "English", MUTED_TEXT_COLOR).apply {
+            textSize = 13f
+        }
+        toolbarHost.addView(title, LayoutParams(0, LayoutParams.MATCH_PARENT, 1f))
+
+        toolbarHost.addView(toolbarButton("Mic", isActive = state.recordingState == RecordingState.RECORDING) {
+            callbacks?.onMicClick()
+        })
+        toolbarHost.addView(toolbarButton("设置", isActive = false) {
+            callbacks?.onSettingsClick()
+        })
     }
 
     private fun renderCandidateBar() {
@@ -150,6 +201,7 @@ class NativeKeyboardView(context: Context) : LinearLayout(context) {
                 bottomMargin = dp(1)
             })
         }
+        renderedKeyboardSignature = keyboardSignature()
     }
 
     private fun candidateView(candidate: Candidate): View {
@@ -181,9 +233,50 @@ class NativeKeyboardView(context: Context) : LinearLayout(context) {
             isFocusable = true
             includeFontPadding = false
             background = selectableBackground(keyColor(key), dp(8), BORDER_COLOR)
+            if (key == "backspace") {
+                setOnTouchListener { view, event ->
+                    when (event.actionMasked) {
+                        MotionEvent.ACTION_DOWN -> {
+                            view.isPressed = true
+                            performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
+                            callbacks?.onBackspace()
+                            startBackspaceRepeat()
+                            true
+                        }
+                        MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
+                            view.isPressed = false
+                            stopBackspaceRepeat()
+                            true
+                        }
+                        else -> true
+                    }
+                }
+            } else {
+                setOnClickListener {
+                    performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
+                    handleKey(key)
+                }
+            }
+        }
+    }
+
+    private fun toolbarButton(label: String, isActive: Boolean, action: () -> Unit): TextView {
+        return TextView(context).apply {
+            text = label
+            textSize = 14f
+            typeface = Typeface.DEFAULT_BOLD
+            setTextColor(if (isActive) Color.WHITE else TEXT_COLOR)
+            gravity = Gravity.CENTER
+            includeFontPadding = false
+            minWidth = dp(58)
+            background = selectableBackground(if (isActive) ACCENT_COLOR else Color.WHITE, dp(8), BORDER_COLOR)
             setOnClickListener {
                 performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
-                handleKey(key)
+                action()
+            }
+        }.also {
+            it.layoutParams = LayoutParams(LayoutParams.WRAP_CONTENT, dp(30)).apply {
+                leftMargin = dp(4)
             }
         }
     }
@@ -208,8 +301,11 @@ class NativeKeyboardView(context: Context) : LinearLayout(context) {
             "space" -> callbacks?.onSpace()
             "enter" -> callbacks?.onEnter()
             "lang" -> callbacks?.onToggleLanguage()
-            "settings" -> callbacks?.onSettingsClick()
-            "mic" -> callbacks?.onMicClick()
+            "emoji" -> {
+                layoutMode = KeyboardLayout.EMOJI
+                shiftActive = false
+                renderRows()
+            }
             "?123" -> {
                 layoutMode = KeyboardLayout.SYMBOLS
                 shiftActive = false
@@ -238,10 +334,20 @@ class NativeKeyboardView(context: Context) : LinearLayout(context) {
             "space" -> if (state.isChinese) "空格" else "Space"
             "enter" -> "↵"
             "lang" -> if (state.isChinese) "中" else "EN"
-            "settings" -> "设置"
-            "mic" -> "Mic"
+            "emoji" -> "☺"
             else -> if (shiftActive && layoutMode == KeyboardLayout.ALPHA) key.uppercase() else key
         }
+    }
+
+    private fun startBackspaceRepeat() {
+        stopBackspaceRepeat()
+        repeatingBackspace = true
+        repeatHandler.postDelayed(repeatBackspaceRunnable, BACKSPACE_REPEAT_START_MS)
+    }
+
+    private fun stopBackspaceRepeat() {
+        repeatingBackspace = false
+        repeatHandler.removeCallbacks(repeatBackspaceRunnable)
     }
 
     private fun recordingMessage(): String {
@@ -263,19 +369,25 @@ class NativeKeyboardView(context: Context) : LinearLayout(context) {
     }
 
     private fun activeRows(): List<List<String>> {
-        return if (layoutMode == KeyboardLayout.ALPHA) {
-            listOf(
+        return when (layoutMode) {
+            KeyboardLayout.ALPHA -> listOf(
                 listOf("q", "w", "e", "r", "t", "y", "u", "i", "o", "p"),
                 listOf("a", "s", "d", "f", "g", "h", "j", "k", "l"),
                 listOf("shift", "z", "x", "c", "v", "b", "n", "m", "backspace"),
-                listOf("?123", "lang", "settings", "space", "mic", "enter")
+                listOf("?123", "lang", "emoji", "space", "enter")
             )
-        } else {
-            listOf(
+            KeyboardLayout.SYMBOLS -> listOf(
                 listOf("1", "2", "3", "4", "5", "6", "7", "8", "9", "0"),
-                listOf("@", "#", "$", "%", "&", "*", "-", "+", "(", ")"),
-                listOf("=", "/", "\\", "\"", "'", ":", ";", "!", "?", "backspace"),
-                listOf("abc", "lang", "settings", "space", "mic", "enter")
+                listOf("@", "#", "$", "%", "&", "*", "-", "+", "=", "/"),
+                listOf("(", ")", "[", "]", "{", "}", "<", ">", "_", "backspace"),
+                listOf(",", ".", "?", "!", ":", ";", "\"", "'", "\\", "|"),
+                listOf("abc", "lang", "emoji", "space", "enter")
+            )
+            KeyboardLayout.EMOJI -> listOf(
+                listOf("😀", "😂", "😊", "😍", "😎", "😭", "😡", "👍"),
+                listOf("🙏", "👏", "💪", "❤️", "🔥", "✨", "🎉", "✅"),
+                listOf("🌟", "☀", "🌙", "🍎", "☕", "🚀", "💡", "backspace"),
+                listOf("abc", "?123", "lang", "space", "enter")
             )
         }
     }
@@ -284,16 +396,20 @@ class NativeKeyboardView(context: Context) : LinearLayout(context) {
         return when (key) {
             "space" -> 4f
             "shift", "backspace", "enter" -> 1.55f
-            "settings" -> 1.35f
+            "emoji" -> 1.2f
             else -> 1f
         }
     }
 
     private fun keyColor(key: String): Int {
         return when (key) {
-            "shift", "backspace", "enter", "lang", "settings", "mic", "?123", "abc" -> SPECIAL_KEY_COLOR
+            "shift", "backspace", "enter", "lang", "emoji", "?123", "abc" -> SPECIAL_KEY_COLOR
             else -> Color.WHITE
         }
+    }
+
+    private fun keyboardSignature(): String {
+        return "${layoutMode.name}|$shiftActive|${state.isChinese}"
     }
 
     private fun selectableBackground(color: Int, radius: Int, strokeColor: Int): RippleDrawable {
@@ -320,11 +436,13 @@ class NativeKeyboardView(context: Context) : LinearLayout(context) {
 
     private enum class KeyboardLayout {
         ALPHA,
-        SYMBOLS
+        SYMBOLS,
+        EMOJI
     }
 
     companion object {
         private const val PANEL_COLOR = 0xFFE8EAED.toInt()
+        private const val TOOLBAR_COLOR = 0xFFF1F3F4.toInt()
         private const val SPECIAL_KEY_COLOR = 0xFFDADCE0.toInt()
         private const val BORDER_COLOR = 0x1F000000
         private const val RIPPLE_COLOR = 0x22000000
@@ -332,5 +450,7 @@ class NativeKeyboardView(context: Context) : LinearLayout(context) {
         private const val MUTED_TEXT_COLOR = 0xFF5F6368.toInt()
         private const val ACCENT_COLOR = 0xFF1A73E8.toInt()
         private const val ERROR_COLOR = 0xFFD93025.toInt()
+        private const val BACKSPACE_REPEAT_START_MS = 350L
+        private const val BACKSPACE_REPEAT_MS = 55L
     }
 }

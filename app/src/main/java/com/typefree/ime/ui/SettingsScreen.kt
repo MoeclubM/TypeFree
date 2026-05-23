@@ -30,6 +30,8 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.typefree.ime.data.PreferenceManager
 import com.typefree.ime.data.ProviderConfig
+import com.typefree.ime.service.LLMClient
+import kotlinx.coroutines.launch
 
 enum class SettingsSubScreen {
     MAIN,
@@ -44,6 +46,7 @@ fun SettingsScreen(
     onBackClick: () -> Unit
 ) {
     val context = LocalContext.current
+    val coroutineScope = rememberCoroutineScope()
     var currentScreen by remember { mutableStateOf(SettingsSubScreen.MAIN) }
     var selectedProviderIdForDetail by remember { mutableStateOf<String?>(null) }
 
@@ -208,7 +211,7 @@ fun SettingsScreen(
                         .padding(paddingValues)
                 ) {
                     items(providers) { provider ->
-                        val apiTypeLabel = if (provider.type == "anthropic") "Anthropic" else "OpenAI 兼容"
+                        val apiTypeLabel = providerTypeLabel(provider.type)
                         PreferenceRow(
                             title = provider.name,
                             summary = "类型: $apiTypeLabel | URL: ${provider.baseUrl}",
@@ -238,6 +241,9 @@ fun SettingsScreen(
                 var pApiKey by remember(providerId) { mutableStateOf(provider.apiKey) }
                 var pType by remember(providerId) { mutableStateOf(provider.type) }
                 var pModels by remember(providerId) { mutableStateOf(provider.models) }
+                var pThinkingBudget by remember(providerId) {
+                    mutableStateOf(provider.thinkingBudget.takeIf { it > 0 }?.toString().orEmpty())
+                }
 
                 var showAddModelDialogForDetail by remember { mutableStateOf(false) }
                 var maskKey by remember { mutableStateOf(true) }
@@ -291,31 +297,73 @@ fun SettingsScreen(
                         )
 
                         Text("API 协议类型", style = MaterialTheme.typography.titleMedium)
-                        Row(
-                            verticalAlignment = Alignment.CenterVertically,
-                            modifier = Modifier.clickable { pType = "openai" }
-                        ) {
-                            RadioButton(selected = pType == "openai", onClick = { pType = "openai" })
-                            Text("OpenAI 兼容协议")
-                            Spacer(modifier = Modifier.width(24.dp))
-                            RadioButton(selected = pType == "anthropic", onClick = { pType = "anthropic" })
-                            Text("Anthropic 协议")
+                        Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                            ProviderTypeRow("openai_responses", "OpenAI Responses", pType) { pType = it }
+                            ProviderTypeRow("openai", "OpenAI Chat / 兼容", pType) { pType = it }
+                            ProviderTypeRow("anthropic", "Anthropic Messages", pType) { pType = it }
+                            ProviderTypeRow("gemini", "Gemini generateContent", pType) { pType = it }
                         }
 
-                        Button(
-                            onClick = {
-                                val updatedList = providers.map {
-                                    if (it.id == providerId) {
-                                        it.copy(name = pName, baseUrl = pBaseUrl, apiKey = pApiKey, type = pType)
-                                    } else it
-                                }
-                                providers = updatedList
-                                preferenceManager.saveProviders(updatedList)
-                                Toast.makeText(context, "基本设置已保存", Toast.LENGTH_SHORT).show()
-                            },
+                        OutlinedTextField(
+                            value = pThinkingBudget,
+                            onValueChange = { input -> pThinkingBudget = input.filter { it.isDigit() }.take(6) },
+                            label = { Text("思考预算 tokens (0 或留空为关闭/自动)") },
                             modifier = Modifier.fillMaxWidth()
+                        )
+
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(10.dp)
                         ) {
-                            Text("保存基本信息")
+                            Button(
+                                onClick = {
+                                    val updatedList = providers.map {
+                                        if (it.id == providerId) {
+                                            it.copy(
+                                                name = pName,
+                                                baseUrl = pBaseUrl,
+                                                apiKey = pApiKey,
+                                                type = pType,
+                                                thinkingBudget = pThinkingBudget.toIntOrNull() ?: 0
+                                            )
+                                        } else it
+                                    }
+                                    providers = updatedList
+                                    preferenceManager.saveProviders(updatedList)
+                                    Toast.makeText(context, "基本设置已保存", Toast.LENGTH_SHORT).show()
+                                },
+                                modifier = Modifier.weight(1f)
+                            ) {
+                                Text("保存")
+                            }
+
+                            OutlinedButton(
+                                onClick = {
+                                    val currentProvider = provider.copy(
+                                        name = pName,
+                                        baseUrl = pBaseUrl,
+                                        apiKey = pApiKey,
+                                        type = pType,
+                                        models = pModels,
+                                        thinkingBudget = pThinkingBudget.toIntOrNull() ?: 0
+                                    )
+                                    coroutineScope.launch {
+                                        val result = LLMClient().detectProvider(currentProvider)
+                                        pModels = result.models
+                                        val updatedList = providers.map {
+                                            if (it.id == providerId) {
+                                                currentProvider.copy(models = result.models, capabilities = result.capabilities)
+                                            } else it
+                                        }
+                                        providers = updatedList
+                                        preferenceManager.saveProviders(updatedList)
+                                        Toast.makeText(context, result.message, Toast.LENGTH_LONG).show()
+                                    }
+                                },
+                                modifier = Modifier.weight(1f)
+                            ) {
+                                Text("探测")
+                            }
                         }
 
                         HorizontalDivider(modifier = Modifier.padding(vertical = 12.dp))
@@ -387,15 +435,15 @@ fun SettingsScreen(
                                 // If mappings were pointing to this provider, reset them
                                 if (pinyinProviderId == providerId) {
                                     pinyinProviderId = "openai"
-                                    pinyinModelName = "gpt-4o-mini"
+                                    pinyinModelName = "gpt5.4flash"
                                     preferenceManager.setPinyinProviderId("openai")
-                                    preferenceManager.setPinyinModelName("gpt-4o-mini")
+                                    preferenceManager.setPinyinModelName("gpt5.4flash")
                                 }
                                 if (contextProviderId == providerId) {
                                     contextProviderId = "openai"
-                                    contextModelName = "gpt-4o-mini"
+                                    contextModelName = "gpt5.4flash"
                                     preferenceManager.setContextProviderId("openai")
-                                    preferenceManager.setContextModelName("gpt-4o-mini")
+                                    preferenceManager.setContextModelName("gpt5.4flash")
                                 }
                                 if (asrProviderId == providerId) {
                                     asrProviderId = "openai"
@@ -694,7 +742,7 @@ fun SettingsScreen(
         var addName by remember { mutableStateOf("") }
         var addUrl by remember { mutableStateOf("") }
         var addKey by remember { mutableStateOf("") }
-        var addType by remember { mutableStateOf("openai") }
+        var addType by remember { mutableStateOf("openai_responses") }
 
         AlertDialog(
             onDismissRequest = { showAddProviderDialog = false },
@@ -728,12 +776,11 @@ fun SettingsScreen(
                     )
 
                     Text("API 协议类型", style = MaterialTheme.typography.titleMedium)
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        RadioButton(selected = addType == "openai", onClick = { addType = "openai" })
-                        Text("OpenAI 兼容")
-                        Spacer(modifier = Modifier.width(16.dp))
-                        RadioButton(selected = addType == "anthropic", onClick = { addType = "anthropic" })
-                        Text("Anthropic")
+                    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                        ProviderTypeRow("openai_responses", "OpenAI Responses", addType) { addType = it }
+                        ProviderTypeRow("openai", "OpenAI Chat / 兼容", addType) { addType = it }
+                        ProviderTypeRow("anthropic", "Anthropic Messages", addType) { addType = it }
+                        ProviderTypeRow("gemini", "Gemini generateContent", addType) { addType = it }
                     }
                 }
             },
@@ -822,4 +869,33 @@ fun PreferenceHeader(title: String) {
         color = MaterialTheme.colorScheme.primary,
         modifier = Modifier.padding(start = 16.dp, top = 16.dp, bottom = 8.dp)
     )
+}
+
+@Composable
+fun ProviderTypeRow(
+    type: String,
+    label: String,
+    selectedType: String,
+    onSelected: (String) -> Unit
+) {
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable { onSelected(type) }
+            .padding(vertical = 2.dp)
+    ) {
+        RadioButton(selected = selectedType == type, onClick = { onSelected(type) })
+        Text(label, modifier = Modifier.padding(start = 8.dp))
+    }
+}
+
+fun providerTypeLabel(type: String): String {
+    return when (type) {
+        "openai_responses" -> "OpenAI Responses"
+        "openai" -> "OpenAI Chat / 兼容"
+        "anthropic" -> "Anthropic Messages"
+        "gemini" -> "Gemini generateContent"
+        else -> type
+    }
 }

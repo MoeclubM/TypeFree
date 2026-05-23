@@ -15,8 +15,19 @@ data class ProviderConfig(
     val name: String,
     val baseUrl: String = "",
     val apiKey: String = "",
-    val type: String = "openai", // "openai" or "anthropic"
-    val models: List<String> = emptyList()
+    val type: String = "openai", // openai, openai_responses, anthropic, gemini
+    val models: List<String> = emptyList(),
+    val thinkingBudget: Int = 0,
+    val capabilities: ProviderCapabilities = ProviderCapabilities()
+)
+
+@Serializable
+data class ProviderCapabilities(
+    val supportsModelList: Boolean = false,
+    val supportsStructuredOutput: Boolean = false,
+    val supportsToolCalling: Boolean = false,
+    val supportsThinkingBudget: Boolean = false,
+    val supportsAsr: Boolean = false
 )
 
 class PreferenceManager(context: Context) {
@@ -61,29 +72,40 @@ class PreferenceManager(context: Context) {
                 id = "openai",
                 name = "OpenAI",
                 baseUrl = "https://api.openai.com/v1",
-                type = "openai",
-                models = listOf("gpt-4o-mini", "gpt-4o", "gpt-3.5-turbo", "whisper-1")
+                type = "openai_responses",
+                models = listOf("gpt5.4flash"),
+                capabilities = ProviderCapabilities(
+                    supportsModelList = true,
+                    supportsStructuredOutput = true,
+                    supportsToolCalling = true,
+                    supportsThinkingBudget = true,
+                    supportsAsr = true
+                )
             ),
             ProviderConfig(
                 id = "anthropic",
                 name = "Anthropic",
                 baseUrl = "https://api.anthropic.com/v1",
-                models = listOf("claude-3-5-haiku-20241022", "claude-3-5-sonnet-20241022", "claude-3-opus-20240229"),
-                type = "anthropic"
+                models = listOf("claude4.5-haiku"),
+                type = "anthropic",
+                capabilities = ProviderCapabilities(
+                    supportsStructuredOutput = true,
+                    supportsToolCalling = true,
+                    supportsThinkingBudget = true
+                )
             ),
             ProviderConfig(
                 id = "deepseek",
                 name = "DeepSeek",
                 baseUrl = "https://api.deepseek.com/v1",
-                models = listOf("deepseek-chat", "deepseek-coder"),
-                type = "openai"
-            ),
-            ProviderConfig(
-                id = "ollama",
-                name = "Ollama (Local)",
-                baseUrl = "http://10.0.2.2:11434/v1",
-                models = listOf("llama3", "mistral", "qwen2"),
-                type = "openai"
+                models = listOf("DeepSeekv4flash"),
+                type = "openai",
+                capabilities = ProviderCapabilities(
+                    supportsModelList = true,
+                    supportsStructuredOutput = true,
+                    supportsToolCalling = true,
+                    supportsThinkingBudget = true
+                )
             )
         )
 
@@ -110,10 +132,32 @@ class PreferenceManager(context: Context) {
             }
         } ?: return DEFAULT_PROVIDERS
         return try {
-            json.decodeFromString<List<ProviderConfig>>(providersJson)
+            normalizeProviders(json.decodeFromString<List<ProviderConfig>>(providersJson))
         } catch (e: Exception) {
             Log.e(TAG, "Failed to decode providers", e)
             DEFAULT_PROVIDERS
+        }
+    }
+
+    private fun normalizeProviders(providers: List<ProviderConfig>): List<ProviderConfig> {
+        return providers.mapNotNull { provider ->
+            when (provider.id) {
+                "openai" -> provider.copy(
+                    type = "openai_responses",
+                    models = listOf("gpt5.4flash"),
+                    capabilities = DEFAULT_PROVIDERS.first { it.id == "openai" }.capabilities
+                )
+                "anthropic" -> provider.copy(
+                    models = listOf("claude4.5-haiku"),
+                    capabilities = DEFAULT_PROVIDERS.first { it.id == "anthropic" }.capabilities
+                )
+                "deepseek" -> provider.copy(
+                    models = listOf("DeepSeekv4flash"),
+                    capabilities = DEFAULT_PROVIDERS.first { it.id == "deepseek" }.capabilities
+                )
+                "ollama" -> null
+                else -> provider
+            }
         }
     }
 
@@ -145,7 +189,8 @@ class PreferenceManager(context: Context) {
     }
 
     fun getPinyinModelName(): String {
-        return plainPrefs.getString(KEY_PINYIN_MODEL_NAME, "gpt-4o-mini") ?: "gpt-4o-mini"
+        val stored = plainPrefs.getString(KEY_PINYIN_MODEL_NAME, "gpt5.4flash") ?: "gpt5.4flash"
+        return if (stored in LEGACY_DEFAULT_MODELS) "gpt5.4flash" else stored
     }
 
     fun setPinyinModelName(name: String) {
@@ -162,7 +207,8 @@ class PreferenceManager(context: Context) {
     }
 
     fun getContextModelName(): String {
-        return plainPrefs.getString(KEY_CONTEXT_MODEL_NAME, "gpt-4o-mini") ?: "gpt-4o-mini"
+        val stored = plainPrefs.getString(KEY_CONTEXT_MODEL_NAME, "gpt5.4flash") ?: "gpt5.4flash"
+        return if (stored in LEGACY_DEFAULT_MODELS) "gpt5.4flash" else stored
     }
 
     fun setContextModelName(name: String) {
@@ -218,4 +264,15 @@ class PreferenceManager(context: Context) {
     fun setPinyinLlmEnabled(enabled: Boolean) {
         plainPrefs.edit().putBoolean(KEY_PINYIN_LLM_ENABLED, enabled).apply()
     }
+
+    private val LEGACY_DEFAULT_MODELS = setOf(
+        "gpt-4o-mini",
+        "gpt-4o",
+        "gpt-3.5-turbo",
+        "claude-3-5-haiku-20241022",
+        "claude-3-5-sonnet-20241022",
+        "claude-3-opus-20240229",
+        "deepseek-chat",
+        "deepseek-coder"
+    )
 }

@@ -69,21 +69,27 @@ class PinyinDict(private val context: Context) {
         if (splits.isNotEmpty()) {
             val partCandidates = splits.map { dict[it] ?: emptyList() }
             if (partCandidates.all { it.isNotEmpty() }) {
-                val limit = 5
-                val list1 = partCandidates[0].take(limit)
-                var resultList = list1
+                if (splits.size > MAX_COMPOSED_SEGMENTS) {
+                    val sentence = partCandidates.joinToString("") { it.first() }
+                    candidates.add(sentence)
+                } else {
+                    var resultList = partCandidates[0].take(PART_CANDIDATE_LIMIT)
 
-                for (i in 1 until partCandidates.size) {
-                    val list2 = partCandidates[i].take(limit)
-                    val nextList = mutableListOf<String>()
-                    for (c1 in resultList) {
-                        for (c2 in list2) {
-                            nextList.add(c1 + c2)
+                    for (i in 1 until partCandidates.size) {
+                        val list2 = partCandidates[i].take(PART_CANDIDATE_LIMIT)
+                        val nextList = mutableListOf<String>()
+                        for (c1 in resultList) {
+                            for (c2 in list2) {
+                                nextList.add(c1 + c2)
+                                if (nextList.size >= MAX_COMPOSED_CANDIDATES) break
+                            }
+                            if (nextList.size >= MAX_COMPOSED_CANDIDATES) break
                         }
+                        resultList = nextList
+                        if (resultList.isEmpty()) break
                     }
-                    resultList = nextList
+                    candidates.addAll(resultList)
                 }
-                candidates.addAll(resultList)
             }
         }
 
@@ -94,7 +100,7 @@ class PinyinDict(private val context: Context) {
             candidates.addAll(matches)
         }
 
-        return candidates.distinct()
+        return candidates.distinct().take(MAX_CANDIDATES)
     }
 
     private fun segmentPinyin(input: String): List<String> {
@@ -128,5 +134,9 @@ class PinyinDict(private val context: Context) {
     companion object {
         private const val SEGMENT_CACHE_SIZE = 512
         private const val CANDIDATE_CACHE_SIZE = 1024
+        private const val PART_CANDIDATE_LIMIT = 4
+        private const val MAX_COMPOSED_SEGMENTS = 6
+        private const val MAX_COMPOSED_CANDIDATES = 32
+        private const val MAX_CANDIDATES = 40
     }
 }

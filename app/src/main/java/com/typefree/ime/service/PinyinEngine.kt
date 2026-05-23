@@ -16,7 +16,6 @@ class PinyinEngine(context: Context, private val preferenceManager: PreferenceMa
     private val llmClient = LLMClient()
     
     private val scope = CoroutineScope(Dispatchers.Main + SupervisorJob())
-    private var localJob: Job? = null
     private var llmJob: Job? = null
     private var latestPinyinInput = ""
     private var latestLocalCandidates: List<Candidate> = emptyList()
@@ -35,10 +34,9 @@ class PinyinEngine(context: Context, private val preferenceManager: PreferenceMa
         contextText: String,
         listener: CandidateListener
     ) {
-        localJob?.cancel()
         llmJob?.cancel()
         latestPinyinInput = pinyin
-        latestLocalCandidates = emptyList()
+        latestLocalCandidates = pinyinDict.getCandidates(pinyin).map { Candidate(it, isAi = false) }
         latestAiCandidates = emptyList()
 
         if (pinyin.isEmpty()) {
@@ -46,16 +44,7 @@ class PinyinEngine(context: Context, private val preferenceManager: PreferenceMa
             return
         }
 
-        localJob = scope.launch {
-            val initialCandidates = withContext(Dispatchers.IO) {
-                pinyinDict.getCandidates(pinyin).map { Candidate(it, isAi = false) }
-            }
-
-            if (latestPinyinInput == pinyin) {
-                latestLocalCandidates = initialCandidates
-                emitMergedCandidates(listener)
-            }
-        }
+        emitMergedCandidates(listener)
 
         if (preferenceManager.isPinyinLlmEnabled()) {
             val providerId = preferenceManager.getPinyinProviderId()
