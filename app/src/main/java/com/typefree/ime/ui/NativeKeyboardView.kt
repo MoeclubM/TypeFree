@@ -70,7 +70,6 @@ class NativeKeyboardView(context: Context) : LinearLayout(context) {
     private val emojiEntries = EmojiCatalog.load(context)
     private val emojiIndex = EmojiCatalog.index(emojiEntries)
     private val emojiValues = emojiEntries.mapTo(HashSet()) { it.value }
-    private var lastPinyinTouchX = 0f
     private val colors: KeyboardColors
         get() {
             val nightMode = resources.configuration.uiMode and Configuration.UI_MODE_NIGHT_MASK
@@ -374,47 +373,6 @@ class NativeKeyboardView(context: Context) : LinearLayout(context) {
         }
     }
 
-    private fun pinyinEditView(): View {
-        return TextView(context).apply {
-            text = pinyinDisplayText()
-            textSize = 16f
-            typeface = Typeface.DEFAULT_BOLD
-            setTextColor(colors.accent)
-            gravity = Gravity.CENTER_VERTICAL
-            setPadding(dp(10), 0, dp(10), 0)
-            minWidth = dp(48)
-            maxWidth = dp(116)
-            isSingleLine = true
-            ellipsize = TextUtils.TruncateAt.START
-            background = selectableBackground(colors.pinyinChip, dp(8), colors.border)
-            setOnClickListener {
-                performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
-                val offset = getOffsetForPosition(lastPinyinTouchX, height / 2f)
-                callbacks?.onPinyinClick(displayOffsetToPinyinOffset(offset))
-            }
-            setOnTouchListener { view, event ->
-                when (event.actionMasked) {
-                    MotionEvent.ACTION_DOWN -> {
-                        lastPinyinTouchX = event.x
-                        view.isPressed = true
-                        true
-                    }
-                    MotionEvent.ACTION_UP -> {
-                        lastPinyinTouchX = event.x
-                        view.isPressed = false
-                        view.performClick()
-                        true
-                    }
-                    MotionEvent.ACTION_CANCEL -> {
-                        view.isPressed = false
-                        true
-                    }
-                    else -> true
-                }
-            }
-        }
-    }
-
     private fun emojiCandidateView(entry: EmojiEntry): View {
         return TextView(context).apply {
             text = entry.value
@@ -653,8 +611,8 @@ class NativeKeyboardView(context: Context) : LinearLayout(context) {
             "emojiSearchClear" -> "×"
             "emojiSearchBackspace" -> "⌫"
             "emojiSearchSpace" -> "空格"
-            "symPrev", "emojiPrev" -> "‹"
-            "symNext", "emojiNext" -> "›"
+            "symPrev" -> "‹"
+            "symNext" -> "›"
             else -> if (shiftActive && layoutMode == KeyboardLayout.ALPHA) key.uppercase() else key
         }
     }
@@ -666,7 +624,7 @@ class NativeKeyboardView(context: Context) : LinearLayout(context) {
             "shift" -> 28f
             "backspace", "emojiSearchBackspace" -> 24f
             "emojiSearch", "emojiSearchClose", "emojiSearchClear",
-            "symPrev", "symNext", "emojiPrev", "emojiNext" -> 22f
+            "symPrev", "symNext" -> 22f
             "space", "?123", "abc", "lang" -> 14f
             "emojiSearchSpace" -> 14f
             else -> if (isSpecialKey(key)) 14f else if (key.length == 1) 19f else 22f
@@ -723,7 +681,7 @@ class NativeKeyboardView(context: Context) : LinearLayout(context) {
             ",", "." -> 1.1f
             "shift", "backspace", "enter" -> 1.55f
             "emoji", "emojiSearch", "emojiSearchClose", "emojiSearchClear",
-            "emojiSearchBackspace", "symPrev", "symNext", "emojiPrev", "emojiNext" -> 1.2f
+            "emojiSearchBackspace", "symPrev", "symNext" -> 1.2f
             else -> 1f
         }
     }
@@ -736,7 +694,7 @@ class NativeKeyboardView(context: Context) : LinearLayout(context) {
         return when (key) {
             "shift", "backspace", "enter", "lang", "emoji", "?123", "abc",
             "emojiSearch", "emojiSearchClose", "emojiSearchClear", "emojiSearchBackspace",
-            "emojiSearchSpace", "symPrev", "symNext", "emojiPrev", "emojiNext" -> colors.specialKey
+            "emojiSearchSpace", "symPrev", "symNext" -> colors.specialKey
             else -> colors.key
         }
     }
@@ -939,9 +897,7 @@ class NativeKeyboardView(context: Context) : LinearLayout(context) {
             "?123",
             "abc",
             "symPrev",
-            "symNext",
-            "emojiPrev",
-            "emojiNext"
+            "symNext"
         ) + EMOJI_CATEGORY_KEYS
 
         private val LIGHT_COLORS = KeyboardColors(
