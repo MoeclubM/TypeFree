@@ -16,6 +16,7 @@ data class ProviderConfig(
     val baseUrl: String = "",
     val apiKey: String = "",
     val type: String = "openai", // openai, openai_responses, anthropic, gemini, qwen_asr, volcengine_asr
+    val enabled: Boolean = false,
     val models: List<String> = emptyList(),
     val thinkingBudget: Int = 0,
     val modelSettings: Map<String, ModelSettings> = emptyMap(),
@@ -41,6 +42,20 @@ data class ProviderCapabilities(
 data class UserPinyinEntry(
     val pinyin: String,
     val word: String
+)
+
+@Serializable
+data class AiRequestLog(
+    val timestampMs: Long,
+    val feature: String,
+    val providerId: String,
+    val providerName: String,
+    val modelName: String,
+    val systemPrompt: String,
+    val userPrompt: String,
+    val rawResponse: String?,
+    val parsedOutput: List<String> = emptyList(),
+    val error: String? = null
 )
 
 class PreferenceManager(context: Context) {
@@ -79,7 +94,10 @@ class PreferenceManager(context: Context) {
         private const val KEY_ASR_LANGUAGE = "asr_language"
         private const val KEY_CONTEXT_PREDICTION_ENABLED = "context_prediction_enabled"
         private const val KEY_PINYIN_LLM_ENABLED = "pinyin_llm_enabled"
+        private const val KEY_VOICE_INPUT_ENABLED = "voice_input_enabled"
         private const val KEY_USER_PINYIN_DICT = "user_pinyin_dict_v1"
+        private const val KEY_AI_REQUEST_LOGS = "ai_request_logs_v1"
+        private const val KEY_EMOJI_RECENT_COUNTS = "emoji_recent_counts_v1"
 
         val DEFAULT_PROVIDERS = listOf(
             ProviderConfig(
@@ -176,7 +194,7 @@ class PreferenceManager(context: Context) {
             selectedModel: String,
             models: List<String>,
             type: String
-        ) = ProviderConfig(id, name, baseUrl, "", type, models)
+        ) = ProviderConfig(id, name, baseUrl, "", type, false, models)
     }
 
     fun getProviders(): List<ProviderConfig> {
@@ -337,6 +355,62 @@ class PreferenceManager(context: Context) {
         plainPrefs.edit().putBoolean(KEY_PINYIN_LLM_ENABLED, enabled).apply()
     }
 
+    fun isVoiceInputEnabled(): Boolean {
+        return plainPrefs.getBoolean(KEY_VOICE_INPUT_ENABLED, false)
+    }
+
+    fun setVoiceInputEnabled(enabled: Boolean) {
+        plainPrefs.edit().putBoolean(KEY_VOICE_INPUT_ENABLED, enabled).apply()
+    }
+
+    fun getAiRequestLogs(): List<AiRequestLog> {
+        val stored = plainPrefs.getString(KEY_AI_REQUEST_LOGS, null) ?: return emptyList()
+        return try {
+            json.decodeFromString<List<AiRequestLog>>(stored)
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to decode AI request logs", e)
+            emptyList()
+        }
+    }
+
+    fun appendAiRequestLog(log: AiRequestLog) {
+        val logs = (listOf(log) + getAiRequestLogs()).take(MAX_AI_REQUEST_LOGS)
+        plainPrefs.edit().putString(KEY_AI_REQUEST_LOGS, json.encodeToString(logs)).apply()
+    }
+
+    fun clearAiRequestLogs() {
+        plainPrefs.edit().remove(KEY_AI_REQUEST_LOGS).apply()
+    }
+
+    fun exportAiRequestLogsJsonl(): String {
+        return getAiRequestLogs()
+            .asReversed()
+            .joinToString("\n") { log ->
+                json.encodeToString(log)
+            }
+    }
+
+    fun getEmojiRecentCounts(): Map<String, Int> {
+        val stored = plainPrefs.getString(KEY_EMOJI_RECENT_COUNTS, null) ?: return emptyMap()
+        return try {
+            json.decodeFromString<Map<String, Int>>(stored)
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to decode emoji recent counts", e)
+            emptyMap()
+        }
+    }
+
+    fun recordEmojiUse(emoji: String) {
+        if (emoji.isBlank()) return
+        val counts = getEmojiRecentCounts().toMutableMap()
+        counts[emoji] = (counts[emoji] ?: 0) + 1
+        plainPrefs.edit()
+            .putString(KEY_EMOJI_RECENT_COUNTS, json.encodeToString(counts.entries.sortedByDescending { it.value }
+                .take(MAX_RECENT_EMOJI)
+                .associate { it.key to it.value }))
+            .apply()
+    }
+
     fun getUserPinyinEntries(): List<UserPinyinEntry> {
         val stored = plainPrefs.getString(KEY_USER_PINYIN_DICT, null) ?: return emptyList()
         return try {
@@ -471,4 +545,7 @@ class PreferenceManager(context: Context) {
         "deepseek-chat",
         "deepseek-coder"
     )
+
+    private val MAX_AI_REQUEST_LOGS = 500
+    private val MAX_RECENT_EMOJI = 120
 }

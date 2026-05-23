@@ -109,6 +109,10 @@ class SettingsActivity : ComponentActivity() {
                         preferenceManager.setContextPredictionEnabled(it)
                         refreshSnapshot()
                     },
+                    onToggleVoiceInput = {
+                        preferenceManager.setVoiceInputEnabled(it)
+                        refreshSnapshot()
+                    },
                     onOpenMapping = { mappingDialog = it },
                     onSaveMapping = { target, providerId, modelName -> saveMapping(target, providerId, modelName) },
                     onDismissMapping = { mappingDialog = null },
@@ -143,7 +147,9 @@ class SettingsActivity : ComponentActivity() {
                     onAddDictionaryEntry = { pinyin, word -> addDictionaryEntry(pinyin, word) },
                     onDeleteDictionaryEntry = { entry -> deleteDictionaryEntry(entry) },
                     onImportDictionary = { uri -> importDictionary(uri) },
-                    onExportDictionary = { uri -> exportDictionary(uri) }
+                    onExportDictionary = { uri -> exportDictionary(uri) },
+                    onExportAiLogs = { uri -> exportAiLogs(uri) },
+                    onClearAiLogs = { clearAiLogs() }
                 )
             }
         }
@@ -155,6 +161,8 @@ class SettingsActivity : ComponentActivity() {
             userPinyinEntries = preferenceManager.getUserPinyinEntries(),
             pinyinLlmEnabled = preferenceManager.isPinyinLlmEnabled(),
             contextPredictionEnabled = preferenceManager.isContextPredictionEnabled(),
+            voiceInputEnabled = preferenceManager.isVoiceInputEnabled(),
+            aiRequestLogCount = preferenceManager.getAiRequestLogs().size,
             pinyinProviderId = preferenceManager.getPinyinProviderId(),
             pinyinModelName = preferenceManager.getPinyinModelName(),
             contextProviderId = preferenceManager.getContextProviderId(),
@@ -311,6 +319,28 @@ class SettingsActivity : ComponentActivity() {
         }
     }
 
+    private fun exportAiLogs(uri: Uri) {
+        lifecycleScope.launch {
+            runCatching {
+                contentResolver.openOutputStream(uri)?.use { stream ->
+                    OutputStreamWriter(stream, Charsets.UTF_8).use { writer ->
+                        writer.write(preferenceManager.exportAiRequestLogsJsonl())
+                    }
+                }
+            }.onSuccess {
+                Toast.makeText(this@SettingsActivity, "AI 请求日志已导出", Toast.LENGTH_SHORT).show()
+            }.onFailure {
+                Toast.makeText(this@SettingsActivity, "导出失败: ${it.message}", Toast.LENGTH_LONG).show()
+            }
+        }
+    }
+
+    private fun clearAiLogs() {
+        preferenceManager.clearAiRequestLogs()
+        refreshSnapshot()
+        Toast.makeText(this, "AI 请求日志已清空", Toast.LENGTH_SHORT).show()
+    }
+
 }
 
 private val TYPE_OPTIONS = listOf(
@@ -329,6 +359,8 @@ private data class SettingsSnapshot(
     val userPinyinEntries: List<UserPinyinEntry> = emptyList(),
     val pinyinLlmEnabled: Boolean = true,
     val contextPredictionEnabled: Boolean = true,
+    val voiceInputEnabled: Boolean = false,
+    val aiRequestLogCount: Int = 0,
     val pinyinProviderId: String = "openai",
     val pinyinModelName: String = "",
     val contextProviderId: String = "openai",
@@ -389,6 +421,7 @@ private fun SettingsApp(
     onBack: () -> Unit,
     onTogglePinyinAi: (Boolean) -> Unit,
     onToggleContextPrediction: (Boolean) -> Unit,
+    onToggleVoiceInput: (Boolean) -> Unit,
     onOpenMapping: (MappingDialogState) -> Unit,
     onSaveMapping: (BindingTarget, String, String) -> Unit,
     onDismissMapping: () -> Unit,
@@ -408,7 +441,9 @@ private fun SettingsApp(
     onAddDictionaryEntry: (String, String) -> Unit,
     onDeleteDictionaryEntry: (UserPinyinEntry) -> Unit,
     onImportDictionary: (Uri) -> Unit,
-    onExportDictionary: (Uri) -> Unit
+    onExportDictionary: (Uri) -> Unit,
+    onExportAiLogs: (Uri) -> Unit,
+    onClearAiLogs: () -> Unit
 ) {
     Scaffold(
         modifier = Modifier.fillMaxSize(),
@@ -451,11 +486,14 @@ private fun SettingsApp(
                 snapshot = snapshot,
                 onTogglePinyinAi = onTogglePinyinAi,
                 onToggleContextPrediction = onToggleContextPrediction,
+                onToggleVoiceInput = onToggleVoiceInput,
                 onOpenMapping = onOpenMapping,
                 onOpenChoice = onOpenChoice,
                 onOpenProviders = onOpenProviders,
                 onOpenAsrProviders = onOpenAsrProviders,
-                onOpenLocalDictionary = onOpenLocalDictionary
+                onOpenLocalDictionary = onOpenLocalDictionary,
+                onExportAiLogs = onExportAiLogs,
+                onClearAiLogs = onClearAiLogs
             )
             Screen.TEXT_PROVIDERS -> ProvidersScreen(
                 modifier = Modifier.padding(padding),
@@ -492,9 +530,7 @@ private fun SettingsApp(
             state = state,
             providers = snapshot.providers,
             onDismiss = onDismissMapping,
-            onSave = onSaveMapping,
-            onSaveProvider = onSaveProvider,
-            onDetectProvider = onDetectProvider
+            onSave = onSaveMapping
         )
     }
 
@@ -524,13 +560,21 @@ private fun SettingsMainScreen(
     snapshot: SettingsSnapshot,
     onTogglePinyinAi: (Boolean) -> Unit,
     onToggleContextPrediction: (Boolean) -> Unit,
+    onToggleVoiceInput: (Boolean) -> Unit,
     onOpenMapping: (MappingDialogState) -> Unit,
     onOpenChoice: (ChoiceDialogState) -> Unit,
     onOpenProviders: () -> Unit,
     onOpenAsrProviders: () -> Unit,
-    onOpenLocalDictionary: () -> Unit
+    onOpenLocalDictionary: () -> Unit,
+    onExportAiLogs: (Uri) -> Unit,
+    onClearAiLogs: () -> Unit
 ) {
     var testText by remember { mutableStateOf("") }
+    val aiLogsExportLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.CreateDocument("application/x-ndjson")
+    ) { uri ->
+        if (uri != null) onExportAiLogs(uri)
+    }
 
     Column(
         modifier = modifier
@@ -603,6 +647,12 @@ private fun SettingsMainScreen(
         }
 
         SectionTitle("语音识别")
+        SwitchSettingRow(
+            title = "语音输入",
+            summary = "关闭后键盘不显示麦克风，也不会触发录音或 ASR 请求。",
+            checked = snapshot.voiceInputEnabled,
+            onCheckedChange = onToggleVoiceInput
+        )
         ClickSettingRow(
             title = "语音输入语言",
             summary = "当前识别语种: ${languageLabel(snapshot.asrLanguage)}"
@@ -621,13 +671,13 @@ private fun SettingsMainScreen(
         SectionTitle("连接配置")
         ClickSettingRow(
             title = "管理文本模型服务商",
-            summary = "已添加 ${snapshot.providers.count { it.supportsTextGeneration() }} 个文本服务商"
+            summary = "已启用 ${snapshot.providers.count { it.enabled && it.supportsTextGeneration() }} / ${snapshot.providers.count { it.supportsTextGeneration() }} 个文本服务商"
         ) {
             onOpenProviders()
         }
         ClickSettingRow(
             title = "管理语音识别服务商",
-            summary = "已添加 ${snapshot.providers.count { it.capabilities.supportsAsr }} 个 ASR 服务商"
+            summary = "已启用 ${snapshot.providers.count { it.enabled && it.capabilities.supportsAsr }} / ${snapshot.providers.count { it.capabilities.supportsAsr }} 个 ASR 服务商"
         ) {
             onOpenAsrProviders()
         }
@@ -635,10 +685,33 @@ private fun SettingsMainScreen(
         SectionTitle("本地词典")
         ClickSettingRow(
             title = "管理本地词典",
-            summary = "${snapshot.userPinyinEntries.size} 条用户词条，可导入、导出、添加、删除"
+            summary = "${snapshot.userPinyinEntries.size} 条用户词条；键盘只使用这里的词库"
         ) {
             onOpenLocalDictionary()
         }
+
+        SectionTitle("AI 请求日志")
+        Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+            Button(
+                onClick = { aiLogsExportLauncher.launch("typefree-ai-requests.jsonl") },
+                modifier = Modifier.weight(1f),
+                enabled = snapshot.aiRequestLogCount > 0
+            ) {
+                Text("导出")
+            }
+            Button(
+                onClick = onClearAiLogs,
+                modifier = Modifier.weight(1f),
+                enabled = snapshot.aiRequestLogCount > 0
+            ) {
+                Text("清空")
+            }
+        }
+        Text(
+            text = "${snapshot.aiRequestLogCount} 条请求，JSONL 格式可用于训练数据整理。",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
     }
 }
 
@@ -690,7 +763,7 @@ private fun LocalDictionaryScreen(
         }
 
         Text(
-            text = "格式: pinyin,词1,词2。AI 候选词只会自动学习每次生成的第一条。",
+            text = "格式: pinyin,词1,词2。键盘只使用用户词库；拼音全拼和首字母都会参与匹配。",
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant
         )
@@ -787,7 +860,7 @@ private fun ProvidersScreen(
         providers.forEach { provider ->
             ClickSettingRow(
                 title = provider.name,
-                summary = "${providerTypeLabel(provider.type)} | ${provider.baseUrl.ifBlank { "未配置 Base URL" }}"
+                summary = "${if (provider.enabled) "已启用" else "已关闭"} | ${providerTypeLabel(provider.type)} | ${provider.baseUrl.ifBlank { "未配置 Base URL" }}"
             ) {
                 onOpenProvider(provider.id)
             }
@@ -824,6 +897,7 @@ private fun ProviderDetailScreen(
     var baseUrl by remember(provider.id) { mutableStateOf(provider.baseUrl) }
     var apiKey by remember(provider.id) { mutableStateOf(provider.apiKey) }
     var type by remember(provider.id) { mutableStateOf(provider.type) }
+    var enabled by remember(provider.id) { mutableStateOf(provider.enabled) }
     var models by remember(provider.id) { mutableStateOf(provider.models) }
     var modelSettings by remember(provider.id) { mutableStateOf(provider.modelSettings) }
     var capabilities by remember(provider.id) { mutableStateOf(provider.capabilities) }
@@ -840,6 +914,7 @@ private fun ProviderDetailScreen(
             baseUrl = baseUrl.trim(),
             apiKey = apiKey.trim(),
             type = type,
+            enabled = enabled,
             thinkingBudget = provider.thinkingBudget,
             models = models,
             modelSettings = modelSettings.filterKeys { it in models },
@@ -853,6 +928,12 @@ private fun ProviderDetailScreen(
             .padding(horizontal = 18.dp, vertical = 12.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp)
     ) {
+        SwitchSettingRow(
+            title = "启用此服务商",
+            summary = "关闭后不会出现在模型绑定列表，也不会发起运行时请求。",
+            checked = enabled,
+            onCheckedChange = { enabled = it }
+        )
         OutlinedTextField(
             value = name,
             onValueChange = { name = it },
@@ -1237,11 +1318,10 @@ private fun MappingDialog(
     state: MappingDialogState,
     providers: List<ProviderConfig>,
     onDismiss: () -> Unit,
-    onSave: (BindingTarget, String, String) -> Unit,
-    onSaveProvider: (ProviderConfig) -> Unit,
-    onDetectProvider: (ProviderConfig, (ProviderDetectionResult) -> Unit) -> Unit
+    onSave: (BindingTarget, String, String) -> Unit
 ) {
     val usableProviders = providers.filter { provider ->
+        if (!provider.enabled) return@filter false
         when (state.target) {
             BindingTarget.ASR -> provider.capabilities.supportsAsr
             BindingTarget.PINYIN, BindingTarget.CONTEXT ->
@@ -1267,16 +1347,13 @@ private fun MappingDialog(
         mutableStateOf(state.providerId.takeIf { id -> usableProviders.any { it.id == id } } ?: usableProviders.first().id)
     }
     var selectedModel by remember(state) { mutableStateOf(state.modelName) }
-    var detecting by remember(state) { mutableStateOf(false) }
-    var detectedModels by remember(state, selectedProviderId) { mutableStateOf<List<String>>(emptyList()) }
-    var detectedCapabilities by remember(state, selectedProviderId) { mutableStateOf<ProviderCapabilities?>(null) }
 
     val selectedProvider = usableProviders.firstOrNull { it.id == selectedProviderId } ?: usableProviders.first()
     val boundModel = state.modelName.takeIf { selectedProvider.id == state.providerId }.orEmpty()
-    val availableModels = (selectedProvider.models + detectedModels + boundModel)
+    val availableModels = (selectedProvider.models + boundModel)
         .filter { it.isNotBlank() }
         .distinct()
-    LaunchedEffect(selectedProviderId, providers, detectedModels) {
+    LaunchedEffect(selectedProviderId, providers) {
         if (selectedModel !in availableModels) {
             selectedModel = availableModels.firstOrNull().orEmpty()
         }
@@ -1304,7 +1381,7 @@ private fun MappingDialog(
                 Text("模型", style = MaterialTheme.typography.labelLarge)
                 if (availableModels.isEmpty()) {
                     Text(
-                        text = "当前服务商没有模型。点击获取模型列表，或在服务商详情手动添加。",
+                        text = "当前服务商没有模型，请在服务商详情手动添加或探测后选择添加。",
                         style = MaterialTheme.typography.bodyMedium,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
@@ -1323,36 +1400,11 @@ private fun MappingDialog(
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
-                TextButton(
-                    onClick = {
-                        detecting = true
-                        onDetectProvider(selectedProvider) {
-                            detecting = false
-                            detectedModels = it.models
-                            detectedCapabilities = it.capabilities
-                        }
-                    },
-                    enabled = !detecting && selectedProvider.baseUrl.isNotBlank()
-                ) {
-                    if (detecting) {
-                        CircularProgressIndicator(modifier = Modifier.size(18.dp), strokeWidth = 2.dp)
-                        Spacer(modifier = Modifier.width(8.dp))
-                    }
-                    Text("获取模型列表")
-                }
             }
         },
         confirmButton = {
             TextButton(
                 onClick = {
-                    if (selectedModel !in selectedProvider.models || detectedCapabilities != null) {
-                        onSaveProvider(
-                            selectedProvider.copy(
-                                models = (selectedProvider.models + selectedModel).distinct(),
-                                capabilities = detectedCapabilities ?: selectedProvider.capabilities
-                            )
-                        )
-                    }
                     onSave(state.target, selectedProviderId, selectedModel)
                 },
                 enabled = selectedModel.isNotBlank()
@@ -1650,6 +1702,7 @@ private fun bindingSummary(snapshot: SettingsSnapshot, providerId: String, model
 
 private fun providerReadiness(provider: ProviderConfig): String {
     return when {
+        !provider.enabled -> "服务商已关闭"
         provider.baseUrl.isBlank() -> "未配置 Base URL"
         provider.apiKey.isBlank() && !provider.baseUrl.isLocalEndpoint() -> "未配置 API Key，AI 功能不会请求网络"
         provider.models.isEmpty() -> "未配置模型列表"

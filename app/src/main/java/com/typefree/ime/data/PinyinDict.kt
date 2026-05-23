@@ -1,23 +1,21 @@
 package com.typefree.ime.data
 
 import android.content.Context
-import android.util.Log
-import java.io.BufferedReader
-import java.io.InputStreamReader
 
 class PinyinDict {
     private val dict = HashMap<String, MutableList<String>>()
     private var sortedKeys: List<String> = emptyList()
+    private var maxKeyLength: Int = 1
+    private var initialIndex: Map<String, List<String>> = emptyMap()
 
     private val segmentCache = SimpleLruCache<String, List<String>>(SEGMENT_CACHE_SIZE)
     private val candidateCache = SimpleLruCache<String, List<String>>(CANDIDATE_CACHE_SIZE)
 
     constructor(context: Context) {
-        loadDict(context)
+        rebuildIndex()
     }
 
     constructor(context: Context, preferenceManager: PreferenceManager) {
-        loadDict(context)
         loadUserDict(preferenceManager.getUserPinyinEntries())
     }
 
@@ -29,35 +27,6 @@ class PinyinDict {
             }
         }
         rebuildIndex()
-    }
-
-    private fun loadDict(context: Context) {
-        try {
-            val assetManager = context.assets
-            val inputStream = assetManager.open("pinyin.txt")
-            val reader = BufferedReader(InputStreamReader(inputStream))
-            var line: String? = reader.readLine()
-            while (line != null) {
-                if (line.isNotEmpty()) {
-                    val parts = line.split(",")
-                    if (parts.size >= 2) {
-                        val pinyin = parts[0].trim().lowercase()
-                        val words = parts.subList(1, parts.size).map { it.trim() }.filter { it.isNotEmpty() }
-                        if (dict.containsKey(pinyin)) {
-                            dict[pinyin]?.addAll(words)
-                        } else {
-                            dict[pinyin] = words.toMutableList()
-                        }
-                    }
-                }
-                line = reader.readLine()
-            }
-            reader.close()
-            rebuildIndex()
-            Log.d("PinyinDict", "Loaded ${dict.size} pinyin keys.")
-        } catch (e: Exception) {
-            Log.e("PinyinDict", "Failed to load pinyin dict", e)
-        }
     }
 
     private fun loadUserDict(entries: List<UserPinyinEntry>) {
@@ -149,6 +118,7 @@ class PinyinDict {
         }
 
         candidates.addAll(prefixCompletionCandidates(clean))
+        candidates.addAll(acronymCandidates(clean))
 
         if (clean.length == 1) {
             val matches = sortedKeys.filter { it.startsWith(clean) && it.length > 1 }
@@ -166,7 +136,7 @@ class PinyinDict {
 
         while (index < input.length) {
             var exact: String? = null
-            for (width in minOf(6, input.length - index) downTo 1) {
+            for (width in minOf(maxKeyLength, input.length - index) downTo 1) {
                 val sub = input.substring(index, index + width)
                 if (dict.containsKey(sub)) {
                     exact = sub
@@ -230,7 +200,7 @@ class PinyinDict {
 
         while (index < len) {
             var found = false
-            for (width in minOf(6, len - index) downTo 1) {
+            for (width in minOf(maxKeyLength, len - index) downTo 1) {
                 val sub = input.substring(index, index + width)
                 if (dict.containsKey(sub)) {
                     result.add(sub)
@@ -251,6 +221,61 @@ class PinyinDict {
 
     private fun rebuildIndex() {
         sortedKeys = dict.keys.sortedWith(compareBy<String> { it.length }.thenBy { it })
+        maxKeyLength = maxOf(1, dict.keys.maxOfOrNull { it.length } ?: 1)
+        val initials = LinkedHashMap<String, MutableList<String>>()
+        dict.forEach { (pinyin, words) ->
+            pinyinInitialKeys(pinyin).forEach { key ->
+                if (key.length > 1 && key != pinyin) {
+                    initials.getOrPut(key) { mutableListOf() }.addAll(words)
+                }
+            }
+        }
+        initialIndex = initials.mapValues { (_, words) -> words.distinct() }
+    }
+
+    private fun acronymCandidates(input: String): List<String> {
+        return initialIndex[input].orEmpty().take(ACRONYM_WORD_LIMIT)
+    }
+
+    private fun pinyinInitialKeys(pinyin: String): Set<String> {
+        val syllables = splitPinyinSyllables(pinyin)
+        if (syllables.size <= 1) return emptySet()
+        val short = syllables.joinToString("") { syllable ->
+            when {
+                syllable.startsWith("zh") -> "z"
+                syllable.startsWith("ch") -> "c"
+                syllable.startsWith("sh") -> "s"
+                else -> syllable.take(1)
+            }
+        }
+        val full = syllables.joinToString("") { syllable ->
+            when {
+                syllable.startsWith("zh") -> "zh"
+                syllable.startsWith("ch") -> "ch"
+                syllable.startsWith("sh") -> "sh"
+                else -> syllable.take(1)
+            }
+        }
+        return setOf(short, full).filter { it.isNotBlank() }.toSet()
+    }
+
+    private fun splitPinyinSyllables(pinyin: String): List<String> {
+        val syllables = mutableListOf<String>()
+        var index = 0
+        while (index < pinyin.length) {
+            var found: String? = null
+            for (width in minOf(MAX_PINYIN_SYLLABLE_LENGTH, pinyin.length - index) downTo 1) {
+                val sub = pinyin.substring(index, index + width)
+                if (sub in PINYIN_SYLLABLES) {
+                    found = sub
+                    break
+                }
+            }
+            if (found == null) return emptyList()
+            syllables.add(found)
+            index += found.length
+        }
+        return syllables
     }
 
     companion object {
@@ -262,6 +287,33 @@ class PinyinDict {
         private const val MAX_COMPOSED_SEGMENTS = 6
         private const val MAX_COMPOSED_CANDIDATES = 32
         private const val MAX_CANDIDATES = 40
+        private const val ACRONYM_WORD_LIMIT = 20
+        private const val MAX_PINYIN_SYLLABLE_LENGTH = 6
+        private val PINYIN_SYLLABLES = setOf(
+            "a", "ai", "an", "ang", "ao",
+            "ba", "bai", "ban", "bang", "bao", "bei", "ben", "beng", "bi", "bian", "biao", "bie", "bin", "bing", "bo", "bu",
+            "ca", "cai", "can", "cang", "cao", "ce", "cen", "ceng", "cha", "chai", "chan", "chang", "chao", "che", "chen", "cheng", "chi", "chong", "chou", "chu", "chua", "chuai", "chuan", "chuang", "chui", "chun", "chuo", "ci", "cong", "cou", "cu", "cuan", "cui", "cun", "cuo",
+            "da", "dai", "dan", "dang", "dao", "de", "dei", "den", "deng", "di", "dia", "dian", "diao", "die", "ding", "diu", "dong", "dou", "du", "duan", "dui", "dun", "duo",
+            "e", "ei", "en", "eng", "er",
+            "fa", "fan", "fang", "fei", "fen", "feng", "fo", "fou", "fu",
+            "ga", "gai", "gan", "gang", "gao", "ge", "gei", "gen", "geng", "gong", "gou", "gu", "gua", "guai", "guan", "guang", "gui", "gun", "guo",
+            "ha", "hai", "han", "hang", "hao", "he", "hei", "hen", "heng", "hong", "hou", "hu", "hua", "huai", "huan", "huang", "hui", "hun", "huo",
+            "ji", "jia", "jian", "jiang", "jiao", "jie", "jin", "jing", "jiong", "jiu", "ju", "juan", "jue", "jun",
+            "ka", "kai", "kan", "kang", "kao", "ke", "ken", "keng", "kong", "kou", "ku", "kua", "kuai", "kuan", "kuang", "kui", "kun", "kuo",
+            "la", "lai", "lan", "lang", "lao", "le", "lei", "leng", "li", "lia", "lian", "liang", "liao", "lie", "lin", "ling", "liu", "lo", "long", "lou", "lu", "lv", "luan", "lve", "lun", "luo",
+            "ma", "mai", "man", "mang", "mao", "me", "mei", "men", "meng", "mi", "mian", "miao", "mie", "min", "ming", "miu", "mo", "mou", "mu",
+            "na", "nai", "nan", "nang", "nao", "ne", "nei", "nen", "neng", "ni", "nian", "niang", "niao", "nie", "nin", "ning", "niu", "nong", "nou", "nu", "nv", "nuan", "nve", "nuo",
+            "o", "ou",
+            "pa", "pai", "pan", "pang", "pao", "pei", "pen", "peng", "pi", "pian", "piao", "pie", "pin", "ping", "po", "pou", "pu",
+            "qi", "qia", "qian", "qiang", "qiao", "qie", "qin", "qing", "qiong", "qiu", "qu", "quan", "que", "qun",
+            "ran", "rang", "rao", "re", "ren", "reng", "ri", "rong", "rou", "ru", "ruan", "rui", "run", "ruo",
+            "sa", "sai", "san", "sang", "sao", "se", "sen", "seng", "sha", "shai", "shan", "shang", "shao", "she", "shei", "shen", "sheng", "shi", "shou", "shu", "shua", "shuai", "shuan", "shuang", "shui", "shun", "shuo", "si", "song", "sou", "su", "suan", "sui", "sun", "suo",
+            "ta", "tai", "tan", "tang", "tao", "te", "teng", "ti", "tian", "tiao", "tie", "ting", "tong", "tou", "tu", "tuan", "tui", "tun", "tuo",
+            "wa", "wai", "wan", "wang", "wei", "wen", "weng", "wo", "wu",
+            "xi", "xia", "xian", "xiang", "xiao", "xie", "xin", "xing", "xiong", "xiu", "xu", "xuan", "xue", "xun",
+            "ya", "yan", "yang", "yao", "ye", "yi", "yin", "ying", "yo", "yong", "you", "yu", "yuan", "yue", "yun",
+            "za", "zai", "zan", "zang", "zao", "ze", "zei", "zen", "zeng", "zha", "zhai", "zhan", "zhang", "zhao", "zhe", "zhei", "zhen", "zheng", "zhi", "zhong", "zhou", "zhu", "zhua", "zhuai", "zhuan", "zhuang", "zhui", "zhun", "zhuo", "zi", "zong", "zou", "zu", "zuan", "zui", "zun", "zuo"
+        )
     }
 }
 

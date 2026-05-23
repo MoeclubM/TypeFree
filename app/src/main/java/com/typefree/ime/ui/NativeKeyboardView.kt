@@ -1,6 +1,7 @@
 package com.typefree.ime.ui
 
 import android.content.Context
+import android.content.res.Configuration
 import android.content.res.ColorStateList
 import android.graphics.Color
 import android.graphics.Rect
@@ -15,10 +16,12 @@ import android.view.HapticFeedbackConstants
 import android.view.MotionEvent
 import android.view.View
 import android.widget.HorizontalScrollView
+import android.widget.ImageButton
 import android.widget.LinearLayout
 import android.widget.TextView
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowInsetsCompat
+import com.typefree.ime.R
 import com.typefree.ime.service.Candidate
 
 class NativeKeyboardView(context: Context) : LinearLayout(context) {
@@ -30,6 +33,7 @@ class NativeKeyboardView(context: Context) : LinearLayout(context) {
         fun onCandidateClick(candidate: Candidate)
         fun onToggleLanguage()
         fun onMicClick()
+        fun onEmojiClick(emoji: String)
         fun onSettingsClick()
         fun onPinyinClick(index: Int)
     }
@@ -40,14 +44,16 @@ class NativeKeyboardView(context: Context) : LinearLayout(context) {
         val candidates: List<Candidate>,
         val isChinese: Boolean,
         val recordingState: RecordingState,
-        val recordingError: String
+        val recordingError: String,
+        val voiceInputEnabled: Boolean = false,
+        val recentEmojiCounts: Map<String, Int> = emptyMap()
     )
 
     var callbacks: Callbacks? = null
 
     private var layoutMode = KeyboardLayout.ALPHA
     private var symbolsPage = 0
-    private var emojiPage = 0
+    private var emojiCategory = RECENT_EMOJI_CATEGORY
     private var emojiSearchMode = false
     private var emojiSearchQuery = ""
     private var shiftActive = false
@@ -62,7 +68,14 @@ class NativeKeyboardView(context: Context) : LinearLayout(context) {
     private val activeBackspacePointers = mutableSetOf<Int>()
     private val targetRect = Rect()
     private val emojiEntries = EmojiCatalog.load(context)
+    private val emojiIndex = EmojiCatalog.index(emojiEntries)
+    private val emojiValues = emojiEntries.mapTo(HashSet()) { it.value }
     private var lastPinyinTouchX = 0f
+    private val colors: KeyboardColors
+        get() {
+            val nightMode = resources.configuration.uiMode and Configuration.UI_MODE_NIGHT_MASK
+            return if (nightMode == Configuration.UI_MODE_NIGHT_YES) DARK_COLORS else LIGHT_COLORS
+        }
 
     private val repeatHandler = Handler(Looper.getMainLooper())
     private var repeatingBackspace = false
@@ -84,7 +97,7 @@ class NativeKeyboardView(context: Context) : LinearLayout(context) {
 
     init {
         orientation = VERTICAL
-        setBackgroundColor(PANEL_COLOR)
+        setBackgroundColor(colors.panel)
         setPadding(baseHorizontalPadding, baseTopPadding, baseHorizontalPadding, baseBottomPadding)
         ViewCompat.setOnApplyWindowInsetsListener(this) { view, insets ->
             val bottomInset = insets.getInsets(WindowInsetsCompat.Type.systemBars()).bottom
@@ -104,7 +117,7 @@ class NativeKeyboardView(context: Context) : LinearLayout(context) {
             }
         )
 
-        pinyinText.setTextColor(ACCENT_COLOR)
+        pinyinText.setTextColor(colors.accent)
         pinyinText.textSize = 16f
         pinyinText.typeface = Typeface.DEFAULT_BOLD
         pinyinText.gravity = Gravity.CENTER_VERTICAL
@@ -113,7 +126,7 @@ class NativeKeyboardView(context: Context) : LinearLayout(context) {
         pinyinText.ellipsize = TextUtils.TruncateAt.START
         pinyinText.visibility = GONE
         pinyinText.isClickable = true
-        pinyinText.background = selectableBackground(Color.WHITE, dp(10), BORDER_COLOR)
+        pinyinText.background = selectableBackground(colors.key, dp(10), colors.border)
         pinyinText.setOnTouchListener { _, event ->
             when (event.actionMasked) {
                 MotionEvent.ACTION_DOWN -> {
@@ -124,8 +137,8 @@ class NativeKeyboardView(context: Context) : LinearLayout(context) {
                     pinyinText.isPressed = false
                     performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
                     val offset = pinyinText.getOffsetForPosition(event.x, event.y)
-                        .coerceIn(0, state.pinyinBuffer.length)
-                    callbacks?.onPinyinClick(offset)
+                        .coerceIn(0, pinyinDisplayText().length)
+                    callbacks?.onPinyinClick(displayOffsetToPinyinOffset(offset))
                     true
                 }
                 MotionEvent.ACTION_CANCEL -> {
@@ -200,12 +213,12 @@ class NativeKeyboardView(context: Context) : LinearLayout(context) {
         toolbarHost.removeAllViews()
         toolbarHost.orientation = HORIZONTAL
         toolbarHost.gravity = Gravity.CENTER_VERTICAL
-        toolbarHost.background = roundedBackground(TOOLBAR_COLOR, dp(10), BORDER_COLOR)
+        toolbarHost.background = roundedBackground(colors.toolbar, dp(10), colors.border)
         toolbarHost.setPadding(dp(6), 0, dp(6), 0)
 
         if (emojiSearchMode) {
             toolbarHost.addView(
-                statusText("🔎 ${emojiSearchQuery.ifBlank { "搜索 emoji" }}", MUTED_TEXT_COLOR),
+                statusText("搜索 ${emojiSearchQuery.ifBlank { "emoji" }}", colors.mutedText),
                 LayoutParams(0, LayoutParams.MATCH_PARENT, 1f)
             )
         } else {
@@ -213,7 +226,7 @@ class NativeKeyboardView(context: Context) : LinearLayout(context) {
         }
 
         if (layoutMode == KeyboardLayout.EMOJI) {
-            toolbarHost.addView(toolbarButton("🔎", isActive = emojiSearchMode) {
+            toolbarHost.addView(toolbarIconButton(R.drawable.ic_search_24, "搜索 emoji", isActive = emojiSearchMode) {
                 emojiSearchMode = true
                 renderToolbar()
                 renderCandidateBar()
@@ -225,7 +238,7 @@ class NativeKeyboardView(context: Context) : LinearLayout(context) {
             })
         }
 
-        toolbarHost.addView(toolbarButton("☺", isActive = layoutMode == KeyboardLayout.EMOJI) {
+        toolbarHost.addView(toolbarIconButton(R.drawable.ic_mood_24, "Emoji", isActive = layoutMode == KeyboardLayout.EMOJI) {
             layoutMode = KeyboardLayout.EMOJI
             emojiSearchMode = false
             shiftActive = false
@@ -237,10 +250,12 @@ class NativeKeyboardView(context: Context) : LinearLayout(context) {
             renderedCandidateSignature = candidateSignature()
             renderedTopVisibilitySignature = topVisibilitySignature()
         })
-        toolbarHost.addView(toolbarButton("🎙", isActive = state.recordingState == RecordingState.RECORDING) {
-            callbacks?.onMicClick()
-        })
-        toolbarHost.addView(toolbarButton("⚙", isActive = false) {
+        if (state.voiceInputEnabled) {
+            toolbarHost.addView(toolbarIconButton(R.drawable.ic_mic_24, "语音输入", isActive = state.recordingState == RecordingState.RECORDING) {
+                callbacks?.onMicClick()
+            })
+        }
+        toolbarHost.addView(toolbarIconButton(R.drawable.ic_settings_24, "设置", isActive = false) {
             callbacks?.onSettingsClick()
         })
     }
@@ -249,7 +264,7 @@ class NativeKeyboardView(context: Context) : LinearLayout(context) {
         candidateHost.removeAllViews()
         candidateHost.orientation = HORIZONTAL
         candidateHost.gravity = Gravity.CENTER_VERTICAL
-        candidateHost.background = roundedBackground(Color.WHITE, dp(10), BORDER_COLOR)
+        candidateHost.background = roundedBackground(colors.key, dp(10), colors.border)
         candidateHost.setPadding(dp(8), 0, dp(8), 0)
 
         when {
@@ -261,7 +276,7 @@ class NativeKeyboardView(context: Context) : LinearLayout(context) {
                 val results = emojiSearchResults()
                 if (results.isEmpty()) {
                     candidateHost.gravity = Gravity.CENTER
-                    candidateHost.addView(statusText("无结果", MUTED_TEXT_COLOR))
+                    candidateHost.addView(statusText("无结果", colors.mutedText))
                 } else {
                     val scrollView = HorizontalScrollView(context).apply {
                         isHorizontalScrollBarEnabled = false
@@ -279,12 +294,6 @@ class NativeKeyboardView(context: Context) : LinearLayout(context) {
                 }
             }
             isComposing() -> {
-                candidateHost.addView(
-                    pinyinEditView(),
-                    LayoutParams(LayoutParams.WRAP_CONTENT, LayoutParams.MATCH_PARENT).apply {
-                        rightMargin = dp(6)
-                    }
-                )
                 if (state.candidates.isEmpty()) {
                     return
                 }
@@ -315,11 +324,11 @@ class NativeKeyboardView(context: Context) : LinearLayout(context) {
     private fun renderTopVisibility() {
         val composing = isComposing()
         toolbarHost.visibility = if (composing) GONE else VISIBLE
-        pinyinText.visibility = GONE
+        pinyinText.visibility = if (composing) VISIBLE else GONE
         candidateHost.visibility = if (
             state.recordingState != RecordingState.IDLE ||
             emojiSearchMode ||
-            composing
+            (composing && state.candidates.isNotEmpty())
         ) VISIBLE else GONE
     }
 
@@ -349,9 +358,9 @@ class NativeKeyboardView(context: Context) : LinearLayout(context) {
 
     private fun candidateView(candidate: Candidate): View {
         return TextView(context).apply {
-            text = if (candidate.isAi) "AI ${candidate.text}" else candidate.text
+            text = candidate.text
             textSize = 17f
-            setTextColor(TEXT_COLOR)
+            setTextColor(colors.text)
             gravity = Gravity.CENTER
             setPadding(dp(12), 0, dp(12), 0)
             minWidth = dp(44)
@@ -370,14 +379,14 @@ class NativeKeyboardView(context: Context) : LinearLayout(context) {
             text = pinyinDisplayText()
             textSize = 16f
             typeface = Typeface.DEFAULT_BOLD
-            setTextColor(ACCENT_COLOR)
+            setTextColor(colors.accent)
             gravity = Gravity.CENTER_VERTICAL
             setPadding(dp(10), 0, dp(10), 0)
             minWidth = dp(48)
             maxWidth = dp(116)
             isSingleLine = true
             ellipsize = TextUtils.TruncateAt.START
-            background = selectableBackground(PINYIN_CHIP_COLOR, dp(8), BORDER_COLOR)
+            background = selectableBackground(colors.pinyinChip, dp(8), colors.border)
             setOnClickListener {
                 performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
                 val offset = getOffsetForPosition(lastPinyinTouchX, height / 2f)
@@ -410,14 +419,14 @@ class NativeKeyboardView(context: Context) : LinearLayout(context) {
         return TextView(context).apply {
             text = entry.value
             textSize = 24f
-            setTextColor(TEXT_COLOR)
+            setTextColor(colors.text)
             gravity = Gravity.CENTER
             setPadding(dp(10), 0, dp(10), 0)
             minWidth = dp(44)
             background = selectableBackground(Color.TRANSPARENT, dp(8), Color.TRANSPARENT)
             setOnClickListener {
                 performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
-                callbacks?.onKeyClick(entry.value)
+                callbacks?.onEmojiClick(entry.value)
             }
         }.also {
             it.layoutParams = LayoutParams(LayoutParams.WRAP_CONTENT, LayoutParams.MATCH_PARENT)
@@ -429,12 +438,12 @@ class NativeKeyboardView(context: Context) : LinearLayout(context) {
             text = keyLabel(key)
             textSize = keyTextSize(key)
             typeface = if (key.length == 1) Typeface.DEFAULT else Typeface.DEFAULT_BOLD
-            setTextColor(TEXT_COLOR)
+            setTextColor(if (isActiveCategoryKey(key)) Color.WHITE else colors.text)
             gravity = Gravity.CENTER
             isClickable = false
             isFocusable = false
             includeFontPadding = false
-            background = selectableBackground(keyColor(key), dp(8), BORDER_COLOR)
+            background = selectableBackground(keyColor(key), dp(8), colors.border)
         }
     }
 
@@ -502,16 +511,13 @@ class NativeKeyboardView(context: Context) : LinearLayout(context) {
         }
     }
 
-    private fun toolbarButton(label: String, isActive: Boolean, action: () -> Unit): TextView {
-        return TextView(context).apply {
-            text = label
-            textSize = 14f
-            typeface = Typeface.DEFAULT_BOLD
-            setTextColor(if (isActive) Color.WHITE else TEXT_COLOR)
-            gravity = Gravity.CENTER
-            includeFontPadding = false
-            minWidth = dp(34)
-            background = selectableBackground(if (isActive) ACCENT_COLOR else Color.WHITE, dp(17), BORDER_COLOR)
+    private fun toolbarIconButton(iconRes: Int, description: String, isActive: Boolean, action: () -> Unit): ImageButton {
+        return ImageButton(context).apply {
+            setImageResource(iconRes)
+            imageTintList = ColorStateList.valueOf(if (isActive) Color.WHITE else colors.text)
+            contentDescription = description
+            scaleType = android.widget.ImageView.ScaleType.CENTER
+            background = selectableBackground(if (isActive) colors.accent else colors.key, dp(17), colors.border)
             setOnClickListener {
                 performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
                 action()
@@ -587,20 +593,17 @@ class NativeKeyboardView(context: Context) : LinearLayout(context) {
                     refreshEmojiSearchUi(includeRows = false)
                 }
             }
+            in EMOJI_CATEGORY_KEYS -> {
+                emojiCategory = key.removePrefix(EMOJI_CATEGORY_KEY_PREFIX)
+                renderRows()
+                renderedKeyboardSignature = keyboardSignature()
+            }
             "symPrev" -> {
                 symbolsPage = previousPage(symbolsPage, SYMBOL_PAGES.size)
                 renderRows()
             }
             "symNext" -> {
                 symbolsPage = nextPage(symbolsPage, SYMBOL_PAGES.size)
-                renderRows()
-            }
-            "emojiPrev" -> {
-                emojiPage = previousPage(emojiPage, emojiPageCount())
-                renderRows()
-            }
-            "emojiNext" -> {
-                emojiPage = nextPage(emojiPage, emojiPageCount())
                 renderRows()
             }
             else -> {
@@ -614,7 +617,11 @@ class NativeKeyboardView(context: Context) : LinearLayout(context) {
                     shiftActive = false
                     renderRows()
                 }
-                callbacks?.onKeyClick(output)
+                if (layoutMode == KeyboardLayout.EMOJI && output in emojiValues) {
+                    callbacks?.onEmojiClick(output)
+                } else {
+                    callbacks?.onKeyClick(output)
+                }
             }
         }
     }
@@ -631,6 +638,9 @@ class NativeKeyboardView(context: Context) : LinearLayout(context) {
     }
 
     private fun keyLabel(key: String): String {
+        if (key.startsWith(EMOJI_CATEGORY_KEY_PREFIX)) {
+            return EMOJI_CATEGORY_LABELS[key.removePrefix(EMOJI_CATEGORY_KEY_PREFIX)].orEmpty()
+        }
         return when (key) {
             "shift" -> if (shiftActive) "↑" else "↑"
             "backspace" -> "⌫"
@@ -650,6 +660,7 @@ class NativeKeyboardView(context: Context) : LinearLayout(context) {
     }
 
     private fun keyTextSize(key: String): Float {
+        if (key.startsWith(EMOJI_CATEGORY_KEY_PREFIX)) return 11f
         return when (key) {
             "enter" -> 30f
             "shift" -> 28f
@@ -684,10 +695,10 @@ class NativeKeyboardView(context: Context) : LinearLayout(context) {
 
     private fun recordingColor(): Int {
         return when (state.recordingState) {
-            RecordingState.RECORDING -> ERROR_COLOR
-            RecordingState.TRANSCRIBING -> ACCENT_COLOR
-            RecordingState.ERROR -> ERROR_COLOR
-            RecordingState.IDLE -> MUTED_TEXT_COLOR
+            RecordingState.RECORDING -> colors.error
+            RecordingState.TRANSCRIBING -> colors.accent
+            RecordingState.ERROR -> colors.error
+            RecordingState.IDLE -> colors.mutedText
         }
     }
 
@@ -700,11 +711,12 @@ class NativeKeyboardView(context: Context) : LinearLayout(context) {
                 listOf("?123", "lang", ",", "space", ".", "enter")
             )
             KeyboardLayout.SYMBOLS -> SYMBOL_PAGES[symbolsPage.coerceIn(0, SYMBOL_PAGES.lastIndex)]
-            KeyboardLayout.EMOJI -> if (emojiSearchMode) EMOJI_SEARCH_ROWS else emojiPageRows()
+            KeyboardLayout.EMOJI -> if (emojiSearchMode) EMOJI_SEARCH_ROWS else emojiCategoryRows()
         }
     }
 
     private fun keyWeight(key: String): Float {
+        if (key.startsWith(EMOJI_CATEGORY_KEY_PREFIX)) return 1f
         return when (key) {
             "space" -> 4f
             "emojiSearchSpace" -> 3f
@@ -717,20 +729,29 @@ class NativeKeyboardView(context: Context) : LinearLayout(context) {
     }
 
     private fun keyColor(key: String): Int {
+        if (key.startsWith(EMOJI_CATEGORY_KEY_PREFIX)) {
+            val category = key.removePrefix(EMOJI_CATEGORY_KEY_PREFIX)
+            return if (category == emojiCategory) colors.accent else colors.specialKey
+        }
         return when (key) {
             "shift", "backspace", "enter", "lang", "emoji", "?123", "abc",
             "emojiSearch", "emojiSearchClose", "emojiSearchClear", "emojiSearchBackspace",
-            "emojiSearchSpace", "symPrev", "symNext", "emojiPrev", "emojiNext" -> SPECIAL_KEY_COLOR
-            else -> Color.WHITE
+            "emojiSearchSpace", "symPrev", "symNext", "emojiPrev", "emojiNext" -> colors.specialKey
+            else -> colors.key
         }
     }
 
+    private fun isActiveCategoryKey(key: String): Boolean {
+        return key.startsWith(EMOJI_CATEGORY_KEY_PREFIX) &&
+            key.removePrefix(EMOJI_CATEGORY_KEY_PREFIX) == emojiCategory
+    }
+
     private fun keyboardSignature(): String {
-        return "${layoutMode.name}|$shiftActive|${state.isChinese}|$symbolsPage|$emojiPage|$emojiSearchMode"
+        return "${layoutMode.name}|$shiftActive|${state.isChinese}|$symbolsPage|$emojiCategory|$emojiSearchMode|${state.recentEmojiCounts}"
     }
 
     private fun toolbarSignature(): String {
-        return "${state.recordingState}|${layoutMode.name}|$emojiSearchMode|$emojiSearchQuery"
+        return "${state.recordingState}|${state.voiceInputEnabled}|${layoutMode.name}|$emojiSearchMode|$emojiSearchQuery"
     }
 
     private fun candidateSignature(): String {
@@ -750,7 +771,7 @@ class NativeKeyboardView(context: Context) : LinearLayout(context) {
     }
 
     private fun topVisibilitySignature(): String {
-        return "${isComposing()}|${state.recordingState}|$emojiSearchMode"
+        return "${isComposing()}|${state.candidates.isNotEmpty()}|${state.recordingState}|$emojiSearchMode"
     }
 
     private fun isComposing(): Boolean {
@@ -779,27 +800,28 @@ class NativeKeyboardView(context: Context) : LinearLayout(context) {
         return if (size <= 0) 0 else (current - 1 + size) % size
     }
 
-    private fun emojiPageRows(): List<List<String>> {
-        val pageCount = emojiPageCount()
-        emojiPage = emojiPage.coerceIn(0, pageCount - 1)
-        val values = emojiEntries
-            .drop(emojiPage * EMOJI_PER_PAGE)
-            .take(EMOJI_PER_PAGE)
+    private fun emojiCategoryRows(): List<List<String>> {
+        val values = emojiEntriesForCategory(emojiCategory)
+            .take(EMOJI_PER_CATEGORY_VIEW)
             .map { it.value }
         val rows = values.chunked(EMOJI_COLUMNS).toMutableList()
         while (rows.size < EMOJI_RESULT_ROWS) {
             rows.add(emptyList())
         }
-        rows.add(listOf("abc", "?123", "emojiSearch", "emojiPrev", "space", "emojiNext", "enter"))
-        return rows
+        return EMOJI_CATEGORY_ROWS + rows + listOf(listOf("abc", "?123", "emojiSearch", "space", "enter"))
     }
 
-    private fun emojiPageCount(): Int {
-        return maxOf(1, (emojiEntries.size + EMOJI_PER_PAGE - 1) / EMOJI_PER_PAGE)
+    private fun emojiEntriesForCategory(category: String): List<EmojiEntry> {
+        if (category == RECENT_EMOJI_CATEGORY) {
+            return state.recentEmojiCounts.entries
+                .sortedWith(compareByDescending<Map.Entry<String, Int>> { it.value }.thenBy { it.key })
+                .mapNotNull { (emoji, _) -> emojiEntries.firstOrNull { it.value == emoji } }
+        }
+        return emojiEntries.filter { it.group == category }
     }
 
     private fun emojiSearchResults(): List<EmojiEntry> {
-        return EmojiCatalog.search(emojiEntries, emojiSearchQuery, EMOJI_SEARCH_RESULT_LIMIT)
+        return emojiIndex.search(emojiSearchQuery, EMOJI_SEARCH_RESULT_LIMIT)
     }
 
     private fun isSpecialKey(key: String): Boolean {
@@ -808,7 +830,7 @@ class NativeKeyboardView(context: Context) : LinearLayout(context) {
 
     private fun selectableBackground(color: Int, radius: Int, strokeColor: Int): RippleDrawable {
         return RippleDrawable(
-            ColorStateList.valueOf(RIPPLE_COLOR),
+            ColorStateList.valueOf(colors.ripple),
             roundedBackground(color, radius, strokeColor),
             null
         )
@@ -837,6 +859,20 @@ class NativeKeyboardView(context: Context) : LinearLayout(context) {
     private data class KeyTouchTarget(
         val key: String,
         val view: TextView
+    )
+
+    private data class KeyboardColors(
+        val panel: Int,
+        val toolbar: Int,
+        val key: Int,
+        val specialKey: Int,
+        val pinyinChip: Int,
+        val border: Int,
+        val ripple: Int,
+        val text: Int,
+        val mutedText: Int,
+        val accent: Int,
+        val error: Int
     )
 
     companion object {
@@ -871,6 +907,23 @@ class NativeKeyboardView(context: Context) : LinearLayout(context) {
             listOf("abc", "?123", "emojiSearchClear", "emojiSearchSpace", "emojiSearchClose", "enter")
         )
 
+        private const val EMOJI_CATEGORY_KEY_PREFIX = "emojiCat:"
+        private const val RECENT_EMOJI_CATEGORY = "Recent"
+        private val EMOJI_CATEGORY_LABELS = linkedMapOf(
+            RECENT_EMOJI_CATEGORY to "最近",
+            "Smileys & Emotion" to "表情",
+            "People & Body" to "人物",
+            "Animals & Nature" to "自然",
+            "Food & Drink" to "食物",
+            "Travel & Places" to "旅行",
+            "Activities" to "活动",
+            "Objects" to "物品",
+            "Symbols" to "符号",
+            "Flags" to "旗帜"
+        )
+        private val EMOJI_CATEGORY_KEYS = EMOJI_CATEGORY_LABELS.keys.map { "$EMOJI_CATEGORY_KEY_PREFIX$it" }.toSet()
+        private val EMOJI_CATEGORY_ROWS = EMOJI_CATEGORY_KEYS.toList().chunked(5)
+
         private val SPECIAL_KEYS = setOf(
             "shift",
             "backspace",
@@ -889,23 +942,39 @@ class NativeKeyboardView(context: Context) : LinearLayout(context) {
             "symNext",
             "emojiPrev",
             "emojiNext"
-        )
+        ) + EMOJI_CATEGORY_KEYS
 
-        private const val PANEL_COLOR = 0xFFE8EAED.toInt()
-        private const val TOOLBAR_COLOR = 0xFFF1F3F4.toInt()
-        private const val SPECIAL_KEY_COLOR = 0xFFDADCE0.toInt()
-        private const val PINYIN_CHIP_COLOR = 0xFFEAF2FF.toInt()
-        private const val BORDER_COLOR = 0x1F000000
-        private const val RIPPLE_COLOR = 0x22000000
-        private const val TEXT_COLOR = 0xFF202124.toInt()
-        private const val MUTED_TEXT_COLOR = 0xFF5F6368.toInt()
-        private const val ACCENT_COLOR = 0xFF1A73E8.toInt()
-        private const val ERROR_COLOR = 0xFFD93025.toInt()
+        private val LIGHT_COLORS = KeyboardColors(
+            panel = 0xFFE8EAED.toInt(),
+            toolbar = 0xFFF1F3F4.toInt(),
+            key = 0xFFFFFFFF.toInt(),
+            specialKey = 0xFFDADCE0.toInt(),
+            pinyinChip = 0xFFEAF2FF.toInt(),
+            border = 0x1F000000,
+            ripple = 0x22000000,
+            text = 0xFF202124.toInt(),
+            mutedText = 0xFF5F6368.toInt(),
+            accent = 0xFF1A73E8.toInt(),
+            error = 0xFFD93025.toInt()
+        )
+        private val DARK_COLORS = KeyboardColors(
+            panel = 0xFF1F2023.toInt(),
+            toolbar = 0xFF2A2C31.toInt(),
+            key = 0xFF303238.toInt(),
+            specialKey = 0xFF3C4048.toInt(),
+            pinyinChip = 0xFF1E344F.toInt(),
+            border = 0x33FFFFFF,
+            ripple = 0x33FFFFFF,
+            text = 0xFFE8EAED.toInt(),
+            mutedText = 0xFFBDC1C6.toInt(),
+            accent = 0xFF8AB4F8.toInt(),
+            error = 0xFFF28B82.toInt()
+        )
         private const val BACKSPACE_REPEAT_START_MS = 350L
         private const val BACKSPACE_REPEAT_MS = 55L
         private const val EMOJI_COLUMNS = 8
         private const val EMOJI_RESULT_ROWS = 3
-        private const val EMOJI_PER_PAGE = EMOJI_COLUMNS * EMOJI_RESULT_ROWS
+        private const val EMOJI_PER_CATEGORY_VIEW = EMOJI_COLUMNS * EMOJI_RESULT_ROWS
         private const val EMOJI_SEARCH_RESULT_LIMIT = 80
         private const val PINYIN_CURSOR = "|"
     }

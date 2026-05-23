@@ -81,4 +81,27 @@ class PinyinDictTest {
         assertTrue(candidates.size <= 40)
         assertTrue(candidates.first().startsWith("你好"))
     }
+
+    @Test
+    fun composesLongUserPhrasePinyinWithFollowingSyllable() {
+        val userDict = PinyinDict(
+            mapOf(
+                "fengkuang" to listOf("疯狂"),
+                "de" to listOf("的")
+            )
+        )
+
+        assertTrue(userDict.getCandidates("fengkuangde").contains("疯狂的"))
+    }
+
+    @Test
+    fun matchesPhraseByPinyinInitials() {
+        val userDict = PinyinDict(
+            mapOf(
+                "zhongsuozhouzhi" to listOf("众所周知")
+            )
+        )
+
+        assertTrue(userDict.getCandidates("zszz").contains("众所周知"))
+    }
 }

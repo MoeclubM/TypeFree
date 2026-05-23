@@ -34,4 +34,19 @@ class EmojiCatalogTest {
         assertTrue(EmojiCatalog.search(entries, "xiao", 10).map { it.value }.contains("😀"))
         assertEquals("🚗", EmojiCatalog.search(entries, "che", 10).first().value)
     }
+
+    @Test
+    fun indexedSearchUsesSameAliases() {
+        val entries = EmojiCatalog.parse(
+            listOf(
+                "😀\tgrinning face\tSmileys & Emotion\tface-smiling\tE1.0",
+                "🚗\tautomobile\tTravel & Places\ttransport-ground\tE0.6"
+            )
+        )
+
+        val index = EmojiCatalog.index(entries)
+
+        assertEquals("🚗", index.search("che", 10).first().value)
+        assertTrue(index.search("xiao", 10).map { it.value }.contains("😀"))
+    }
 }

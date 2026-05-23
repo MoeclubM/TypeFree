@@ -1,6 +1,8 @@
 package com.typefree.ime.service
 
 import android.util.Log
+import com.typefree.ime.data.AiRequestLog
+import com.typefree.ime.data.PreferenceManager
 import com.typefree.ime.data.ProviderConfig
 import com.typefree.ime.data.ProviderCapabilities
 import com.typefree.ime.data.UserPinyinEntry
@@ -33,7 +35,12 @@ data class ProviderDetectionResult(
     val message: String
 )
 
-class LLMClient {
+data class AiPinyinResult(
+    val candidates: List<String>,
+    val firstCandidateNextWord: String = ""
+)
+
+class LLMClient(private val preferenceManager: PreferenceManager? = null) {
     private val client = OkHttpClient.Builder()
         .connectTimeout(5, TimeUnit.SECONDS)
         .readTimeout(10, TimeUnit.SECONDS)
@@ -58,8 +65,17 @@ class LLMClient {
      * Translates a given pinyin input into Chinese characters based on surrounding context.
      */
     suspend fun translatePinyin(provider: ProviderConfig, modelName: String, pinyin: String, context: String): List<String> {
+        return translatePinyinWithPrediction(provider, modelName, pinyin, context).candidates
+    }
+
+    suspend fun translatePinyinWithPrediction(
+        provider: ProviderConfig,
+        modelName: String,
+        pinyin: String,
+        context: String
+    ): AiPinyinResult {
         if (modelName.isBlank() || requiresApiKey(provider) || !isSupportedStructuredModel(provider, modelName)) {
-            return emptyList()
+            return AiPinyinResult(emptyList())
         }
 
         val systemPrompt = """
@@ -70,26 +86,40 @@ class LLMClient {
             If the pinyin is invalid or has no obvious exact reading, infer the most likely intended pinyin and still return useful Chinese candidates.
             Put the most likely corrected candidate first, then alternatives.
             Do not return Latin pinyin, explanations, or the corrected pinyin string.
-            Return only a JSON object with a candidates string array and no extra text.
+            Also predict exactly one short Chinese word that is likely to follow the first candidate in this context.
+            Return only a JSON object with a candidates string array and a first_candidate_next_word string. No extra text.
         """.trimIndent()
         val userPrompt = """
             Text before cursor: "$context"
             Current pinyin: "$pinyin"
         """.trimIndent()
 
+        var errorMessage: String? = null
         val rawResponse = try {
             when (provider.type) {
-                "anthropic" -> callAnthropic(provider, modelName, systemPrompt, userPrompt)
-                "openai_responses" -> callOpenAiResponses(provider, modelName, systemPrompt, userPrompt)
-                "gemini" -> callGemini(provider, modelName, systemPrompt, userPrompt)
-                else -> callOpenAiChat(provider, modelName, systemPrompt, userPrompt)
+                "anthropic" -> callAnthropic(provider, modelName, systemPrompt, userPrompt, includeNextWord = true)
+                "openai_responses" -> callOpenAiResponses(provider, modelName, systemPrompt, userPrompt, includeNextWord = true)
+                "gemini" -> callGemini(provider, modelName, systemPrompt, userPrompt, includeNextWord = true)
+                else -> callOpenAiChat(provider, modelName, systemPrompt, userPrompt, includeNextWord = true)
             }
         } catch (e: Exception) {
             logError("Error calling LLM for pinyin", e)
+            errorMessage = e.message
             null
         }
 
-        return parseJsonList(rawResponse)
+        val result = parsePinyinResult(rawResponse)
+        logAiRequest(
+            provider,
+            modelName,
+            "pinyin_candidates",
+            systemPrompt,
+            userPrompt,
+            rawResponse,
+            result.candidates + listOfNotNull(result.firstCandidateNextWord.takeIf { it.isNotBlank() }?.let { "next:$it" }),
+            errorMessage
+        )
+        return result
     }
 
     /**
@@ -110,6 +140,7 @@ class LLMClient {
             Text before cursor: "$context"
         """.trimIndent()
 
+        var errorMessage: String? = null
         val rawResponse = try {
             when (provider.type) {
                 "anthropic" -> callAnthropic(provider, modelName, systemPrompt, userPrompt)
@@ -119,10 +150,13 @@ class LLMClient {
             }
         } catch (e: Exception) {
             logError("Error calling LLM for prediction", e)
+            errorMessage = e.message
             null
         }
 
-        return parseJsonList(rawResponse)
+        val parsed = parseJsonList(rawResponse)
+        logAiRequest(provider, modelName, "context_prediction", systemPrompt, userPrompt, rawResponse, parsed, errorMessage)
+        return parsed
     }
 
     /**
@@ -161,6 +195,7 @@ class LLMClient {
             Selected AI candidate: "$selectedText"
         """.trimIndent()
 
+        var errorMessage: String? = null
         val rawResponse = try {
             when (provider.type) {
                 "anthropic" -> callAnthropic(provider, modelName, systemPrompt, userPrompt)
@@ -170,10 +205,22 @@ class LLMClient {
             }
         } catch (e: Exception) {
             logError("Error calling LLM for dictionary segmentation", e)
+            errorMessage = e.message
             null
         }
 
-        return parsePinyinEntryList(rawResponse)
+        val parsed = parsePinyinEntryList(rawResponse)
+        logAiRequest(
+            provider = provider,
+            modelName = modelName,
+            feature = "dictionary_segmentation",
+            systemPrompt = systemPrompt,
+            userPrompt = userPrompt,
+            rawResponse = rawResponse,
+            parsedOutput = parsed.map { "${it.pinyin}\t${it.word}" },
+            error = errorMessage
+        )
+        return parsed
     }
 
     suspend fun detectProvider(provider: ProviderConfig): ProviderDetectionResult = withContext(Dispatchers.IO) {
@@ -207,7 +254,13 @@ class LLMClient {
         }
     }
 
-    private suspend fun callOpenAiChat(provider: ProviderConfig, modelName: String, systemPrompt: String, userPrompt: String): String? = withContext(Dispatchers.IO) {
+    private suspend fun callOpenAiChat(
+        provider: ProviderConfig,
+        modelName: String,
+        systemPrompt: String,
+        userPrompt: String,
+        includeNextWord: Boolean = false
+    ): String? = withContext(Dispatchers.IO) {
         val url = if (provider.baseUrl.endsWith("/chat/completions")) provider.baseUrl else "${provider.baseUrl.trimEnd('/')}/chat/completions"
         val thinkingBudget = thinkingBudgetFor(provider, modelName)
         val modelSettings = provider.modelSettings[modelName]
@@ -215,7 +268,7 @@ class LLMClient {
             modelName = modelName,
             systemPrompt = systemPrompt,
             userPrompt = userPrompt,
-            responseFormat = openAiChatPrimaryResponseFormat(provider, modelName),
+            responseFormat = openAiChatPrimaryResponseFormat(provider, modelName, includeNextWord),
             thinkingBudget = thinkingBudget,
             thinkingLevel = modelSettings?.thinkingLevel.orEmpty(),
             providerType = provider.type
@@ -310,7 +363,13 @@ class LLMClient {
         }
     }
 
-    private suspend fun callOpenAiResponses(provider: ProviderConfig, modelName: String, systemPrompt: String, userPrompt: String): String? = withContext(Dispatchers.IO) {
+    private suspend fun callOpenAiResponses(
+        provider: ProviderConfig,
+        modelName: String,
+        systemPrompt: String,
+        userPrompt: String,
+        includeNextWord: Boolean = false
+    ): String? = withContext(Dispatchers.IO) {
         val url = if (provider.baseUrl.endsWith("/responses")) provider.baseUrl else "${provider.baseUrl.trimEnd('/')}/responses"
         val settings = provider.modelSettings[modelName]
         val requestBodyJson = buildOpenAiResponsesRequestBody(
@@ -318,7 +377,8 @@ class LLMClient {
             systemPrompt,
             userPrompt,
             thinkingBudgetFor(provider, modelName),
-            settings?.thinkingLevel.orEmpty()
+            settings?.thinkingLevel.orEmpty(),
+            includeNextWord
         )
 
         val request = authorizedPostRequest(provider, url, requestBodyJson)
@@ -343,14 +403,15 @@ class LLMClient {
         systemPrompt: String,
         userPrompt: String,
         thinkingBudget: Int,
-        thinkingLevel: String = ""
+        thinkingLevel: String = "",
+        includeNextWord: Boolean = false
     ): String {
         return buildJsonObject {
             put("model", modelName)
             put("instructions", systemPrompt)
             put("input", userPrompt)
             putJsonObject("text") {
-                put("format", openAiResponsesJsonSchemaFormat())
+                put("format", openAiResponsesJsonSchemaFormat(includeNextWord))
             }
             val effort = openAiResponsesReasoningEffort(modelName, thinkingBudget, thinkingLevel)
             if (effort != null) {
@@ -361,9 +422,21 @@ class LLMClient {
         }.toString()
     }
 
-    private suspend fun callAnthropic(provider: ProviderConfig, modelName: String, systemPrompt: String, userPrompt: String): String? = withContext(Dispatchers.IO) {
+    private suspend fun callAnthropic(
+        provider: ProviderConfig,
+        modelName: String,
+        systemPrompt: String,
+        userPrompt: String,
+        includeNextWord: Boolean = false
+    ): String? = withContext(Dispatchers.IO) {
         val url = if (provider.baseUrl.endsWith("/messages")) provider.baseUrl else "${provider.baseUrl.trimEnd('/')}/messages"
-        val requestBodyJson = buildAnthropicRequestBody(modelName, systemPrompt, userPrompt, thinkingBudgetFor(provider, modelName))
+        val requestBodyJson = buildAnthropicRequestBody(
+            modelName,
+            systemPrompt,
+            userPrompt,
+            thinkingBudgetFor(provider, modelName),
+            includeNextWord
+        )
         val body = requestBodyJson.toRequestBody(jsonMediaType)
 
         val request = Request.Builder()
@@ -408,7 +481,8 @@ class LLMClient {
         modelName: String,
         systemPrompt: String,
         userPrompt: String,
-        thinkingBudget: Int
+        thinkingBudget: Int,
+        includeNextWord: Boolean = false
     ): String {
         val normalizedThinkingBudget = normalizedAnthropicThinkingBudget(thinkingBudget)
         val maxTokens = maxOf(300, normalizedThinkingBudget + 220)
@@ -429,7 +503,7 @@ class LLMClient {
                 addMessage("user", userPrompt)
             }
             putJsonArray("tools") {
-                add(anthropicCandidateTool())
+                add(anthropicCandidateTool(includeNextWord))
             }
             if (normalizedThinkingBudget == 0) {
                 putJsonObject("tool_choice") {
@@ -440,7 +514,13 @@ class LLMClient {
         }.toString()
     }
 
-    private suspend fun callGemini(provider: ProviderConfig, modelName: String, systemPrompt: String, userPrompt: String): String? = withContext(Dispatchers.IO) {
+    private suspend fun callGemini(
+        provider: ProviderConfig,
+        modelName: String,
+        systemPrompt: String,
+        userPrompt: String,
+        includeNextWord: Boolean = false
+    ): String? = withContext(Dispatchers.IO) {
         val base = provider.baseUrl.trimEnd('/').ifBlank { "https://generativelanguage.googleapis.com/v1beta" }
         val url = if (base.endsWith(":generateContent")) base else "$base/models/$modelName:generateContent"
         val settings = provider.modelSettings[modelName]
@@ -449,7 +529,8 @@ class LLMClient {
             systemPrompt,
             userPrompt,
             thinkingBudgetFor(provider, modelName),
-            settings?.thinkingLevel.orEmpty()
+            settings?.thinkingLevel.orEmpty(),
+            includeNextWord
         )
 
         val requestBuilder = Request.Builder()
@@ -493,7 +574,8 @@ class LLMClient {
         systemPrompt: String,
         userPrompt: String,
         thinkingBudget: Int,
-        thinkingLevel: String = ""
+        thinkingLevel: String = "",
+        includeNextWord: Boolean = false
     ): String {
         return buildJsonObject {
             putJsonObject("systemInstruction") {
@@ -514,7 +596,7 @@ class LLMClient {
             putJsonObject("generationConfig") {
                 put("temperature", 0.3)
                 put("responseMimeType", "application/json")
-                put("responseJsonSchema", geminiCandidateJsonSchema())
+                put("responseJsonSchema", geminiCandidateJsonSchema(includeNextWord))
                 val level = thinkingLevelFor(modelName, thinkingLevel, thinkingBudget)
                 if (isGeminiThinkingLevelModel(modelName) && level.isNotBlank()) {
                     putJsonObject("thinkingConfig") {
@@ -551,13 +633,13 @@ class LLMClient {
         )
     }
 
-    private fun openAiChatJsonSchemaFormat(): JsonObject {
+    private fun openAiChatJsonSchemaFormat(includeNextWord: Boolean = false): JsonObject {
         return buildJsonObject {
             put("type", "json_schema")
             putJsonObject("json_schema") {
                 put("name", "candidate_list")
                 put("strict", true)
-                put("schema", candidatePayloadSchema())
+                put("schema", candidatePayloadSchema(includeNextWord))
             }
         }
     }
@@ -568,32 +650,36 @@ class LLMClient {
         }
     }
 
-    private fun openAiChatPrimaryResponseFormat(provider: ProviderConfig, modelName: String): JsonObject {
+    private fun openAiChatPrimaryResponseFormat(
+        provider: ProviderConfig,
+        modelName: String,
+        includeNextWord: Boolean
+    ): JsonObject {
         return if (isDeepSeekModel(modelName) || provider.name.contains("DeepSeek", ignoreCase = true)) {
             openAiChatJsonObjectFormat()
         } else {
-            openAiChatJsonSchemaFormat()
+            openAiChatJsonSchemaFormat(includeNextWord)
         }
     }
 
-    private fun openAiResponsesJsonSchemaFormat(): JsonObject {
+    private fun openAiResponsesJsonSchemaFormat(includeNextWord: Boolean): JsonObject {
         return buildJsonObject {
             put("type", "json_schema")
             put("name", "candidate_list")
             put("strict", true)
-            put("schema", candidatePayloadSchema())
+            put("schema", candidatePayloadSchema(includeNextWord))
         }
     }
 
-    private fun anthropicCandidateTool(): JsonObject {
+    private fun anthropicCandidateTool(includeNextWord: Boolean): JsonObject {
         return buildJsonObject {
             put("name", CANDIDATE_TOOL_NAME)
             put("description", "Return candidate strings for the input method.")
-            put("input_schema", candidatePayloadSchema())
+            put("input_schema", candidatePayloadSchema(includeNextWord))
         }
     }
 
-    private fun candidatePayloadSchema(): JsonObject {
+    private fun candidatePayloadSchema(includeNextWord: Boolean = false): JsonObject {
         return buildJsonObject {
             put("type", "object")
             putJsonObject("properties") {
@@ -605,15 +691,23 @@ class LLMClient {
                     put("minItems", 1)
                     put("maxItems", 8)
                 }
+                if (includeNextWord) {
+                    putJsonObject("first_candidate_next_word") {
+                        put("type", "string")
+                    }
+                }
             }
             putJsonArray("required") {
                 add(JsonPrimitive("candidates"))
+                if (includeNextWord) {
+                    add(JsonPrimitive("first_candidate_next_word"))
+                }
             }
             put("additionalProperties", false)
         }
     }
 
-    private fun geminiCandidateJsonSchema(): JsonObject {
+    private fun geminiCandidateJsonSchema(includeNextWord: Boolean = false): JsonObject {
         return buildJsonObject {
             put("type", "object")
             putJsonObject("properties") {
@@ -623,9 +717,17 @@ class LLMClient {
                         put("type", "string")
                     }
                 }
+                if (includeNextWord) {
+                    putJsonObject("first_candidate_next_word") {
+                        put("type", "string")
+                    }
+                }
             }
             putJsonArray("required") {
                 add(JsonPrimitive("candidates"))
+                if (includeNextWord) {
+                    add(JsonPrimitive("first_candidate_next_word"))
+                }
             }
         }
     }
@@ -864,16 +966,41 @@ class LLMClient {
      * Safely parses JSON string representation of a List<String>.
      * Cleans markdown json blocks if returned by the LLM.
      */
+    internal fun parsePinyinResult(rawText: String?): AiPinyinResult {
+        if (rawText == null || rawText.trim().isEmpty()) return AiPinyinResult(emptyList())
+
+        val clean = cleanJsonText(rawText)
+        runCatching {
+            val jsonElement = json.parseToJsonElement(clean)
+            if (jsonElement is JsonObject) {
+                val candidates = (jsonElement["candidates"] as? JsonArray)
+                    ?.mapNotNull { element ->
+                        runCatching { element.jsonPrimitive.content.trim() }.getOrNull()
+                    }
+                    ?.filter { it.isNotBlank() }
+                    .orEmpty()
+                    .distinct()
+                    .take(MAX_CANDIDATES)
+                val nextWord = listOf(
+                    "first_candidate_next_word",
+                    "firstCandidateNextWord",
+                    "next_word",
+                    "nextWord"
+                ).firstNotNullOfOrNull { key ->
+                    jsonElement[key]?.jsonPrimitive?.contentOrNull?.trim()?.takeIf { it.isNotBlank() }
+                }.orEmpty()
+                return AiPinyinResult(candidates, nextWord)
+            }
+        }.onFailure {
+            logError("Pinyin result parsing failed: $clean", it)
+        }
+
+        return AiPinyinResult(parseJsonList(rawText).distinct().take(MAX_CANDIDATES))
+    }
+
     internal fun parseJsonList(rawText: String?): List<String> {
         if (rawText == null || rawText.trim().isEmpty()) return emptyList()
-        
-        var clean = rawText.trim()
-        // Strip markdown backticks
-        if (clean.startsWith("```")) {
-            val lines = clean.split("\n")
-            val filteredLines = lines.filter { !it.startsWith("```") }
-            clean = filteredLines.joinToString("\n").trim()
-        }
+        val clean = cleanJsonText(rawText)
 
         // Sometimes LLM puts it in braces or formats it as text. Let's try parsing it as a list first.
         try {
@@ -922,6 +1049,16 @@ class LLMClient {
         return clean.split(",")
             .map { it.replace("\"", "").replace("[", "").replace("]", "").trim() }
             .filter { it.isNotEmpty() }
+    }
+
+    private fun cleanJsonText(rawText: String): String {
+        var clean = rawText.trim()
+        if (clean.startsWith("```")) {
+            val lines = clean.split("\n")
+            val filteredLines = lines.filter { !it.trimStart().startsWith("```") }
+            clean = filteredLines.joinToString("\n").trim()
+        }
+        return clean
     }
 
     internal fun parsePinyinEntryList(rawText: String?): List<UserPinyinEntry> {
@@ -978,6 +1115,32 @@ class LLMClient {
             normalized.any { it.lowercaseChar() in 'a'..'z' }
     }
 
+    private fun logAiRequest(
+        provider: ProviderConfig,
+        modelName: String,
+        feature: String,
+        systemPrompt: String,
+        userPrompt: String,
+        rawResponse: String?,
+        parsedOutput: List<String>,
+        error: String?
+    ) {
+        preferenceManager?.appendAiRequestLog(
+            AiRequestLog(
+                timestampMs = System.currentTimeMillis(),
+                feature = feature,
+                providerId = provider.id,
+                providerName = provider.name,
+                modelName = modelName,
+                systemPrompt = systemPrompt,
+                userPrompt = userPrompt,
+                rawResponse = rawResponse,
+                parsedOutput = parsedOutput,
+                error = error
+            )
+        )
+    }
+
     private fun logError(message: String, throwable: Throwable? = null) {
         runCatching {
             if (throwable == null) {
@@ -991,6 +1154,7 @@ class LLMClient {
     companion object {
         private const val CANDIDATE_TOOL_NAME = "emit_candidates"
         private const val MAX_LEARNED_ENTRIES = 12
+        private const val MAX_CANDIDATES = 8
         private val SUPPORTED_STRUCTURED_MODEL_PREFIXES = listOf(
             "gpt",
             "o1",

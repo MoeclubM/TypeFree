@@ -22,6 +22,16 @@ class LLMClientTest {
     }
 
     @Test
+    fun parsesPinyinResultWithPredictedNextWord() {
+        val result = client.parsePinyinResult(
+            """{"candidates":["你好","你号"],"first_candidate_next_word":"世界"}"""
+        )
+
+        assertEquals(listOf("你好", "你号"), result.candidates)
+        assertEquals("世界", result.firstCandidateNextWord)
+    }
+
+    @Test
     fun parsesMarkdownWrappedCandidateObject() {
         val candidates = client.parseJsonList(
             """

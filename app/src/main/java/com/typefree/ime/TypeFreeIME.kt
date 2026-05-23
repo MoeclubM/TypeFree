@@ -72,6 +72,9 @@ class TypeFreeIME : InputMethodService(),
                 }
                 override fun onToggleLanguage() = safeImeCall("toggle language") { viewModel.onToggleLanguage() }
                 override fun onMicClick() = safeImeCall("mic click") { viewModel.onMicClick() }
+                override fun onEmojiClick(emoji: String) = safeImeCall("emoji click") {
+                    viewModel.onEmojiClick(emoji)
+                }
                 override fun onSettingsClick() {
                     safeImeCall("settings click") {
                         startActivity(Intent(this@TypeFreeIME, SettingsActivity::class.java).apply {
@@ -90,20 +93,35 @@ class TypeFreeIME : InputMethodService(),
             val pinyinState = combine(viewModel.pinyinBuffer, viewModel.pinyinCursor) { buffer, cursor ->
                 buffer to cursor
             }
-            combine(
+            val inputState = combine(
                 pinyinState,
                 viewModel.candidates,
-                viewModel.isChinese,
+                viewModel.isChinese
+            ) { pinyinStateValue, candidates, isChinese ->
+                Triple(pinyinStateValue, candidates, isChinese)
+            }
+            val recordingState = combine(
                 viewModel.recordingState,
-                viewModel.recordingError
-            ) { pinyinStateValue, candidates, isChinese, recordingState, recordingError ->
+                viewModel.recordingError,
+                viewModel.voiceInputEnabled
+            ) { state, error, voiceInputEnabled ->
+                Triple(state, error, voiceInputEnabled)
+            }
+            combine(
+                inputState,
+                recordingState,
+                viewModel.recentEmojiCounts
+            ) { input, recording, recentEmojiCounts ->
+                val pinyinStateValue = input.first
                 NativeKeyboardView.State(
                     pinyinBuffer = pinyinStateValue.first,
                     pinyinCursor = pinyinStateValue.second,
-                    candidates = candidates,
-                    isChinese = isChinese,
-                    recordingState = recordingState,
-                    recordingError = recordingError
+                    candidates = input.second,
+                    isChinese = input.third,
+                    recordingState = recording.first,
+                    recordingError = recording.second,
+                    voiceInputEnabled = recording.third,
+                    recentEmojiCounts = recentEmojiCounts
                 )
             }.collect { state ->
                 try {

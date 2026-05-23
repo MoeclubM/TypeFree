@@ -15,6 +15,8 @@ import com.typefree.ime.ui.RecordingState
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import java.io.File
 
@@ -43,6 +45,14 @@ class InputViewModel(
     private val _recordingError = MutableStateFlow("")
     val recordingError: StateFlow<String> = _recordingError.asStateFlow()
 
+    private val _voiceInputEnabled = MutableStateFlow(preferenceManager.isVoiceInputEnabled())
+    val voiceInputEnabled: StateFlow<Boolean> = _voiceInputEnabled.asStateFlow()
+
+    private val _recentEmojiCounts = MutableStateFlow(preferenceManager.getEmojiRecentCounts())
+    val recentEmojiCounts: StateFlow<Map<String, Int>> = _recentEmojiCounts.asStateFlow()
+
+    private var recordingErrorResetJob: Job? = null
+
     fun onStartInput() {
         _pinyinBuffer.value = ""
         _pinyinCursor.value = 0
@@ -50,11 +60,15 @@ class InputViewModel(
     }
 
     fun onStartInputView() {
+        _voiceInputEnabled.value = preferenceManager.isVoiceInputEnabled()
+        _recentEmojiCounts.value = preferenceManager.getEmojiRecentCounts()
         fetchContextPredictions()
     }
 
     fun onWindowHidden() {
         asrClient.stopApiRecording()
+        recordingErrorResetJob?.cancel()
+        _recordingError.value = ""
         _recordingState.value = RecordingState.IDLE
     }
 
@@ -144,11 +158,15 @@ class InputViewModel(
     }
 
     fun onMicClick() {
+        if (!preferenceManager.isVoiceInputEnabled()) {
+            stopRecordingUi()
+            return
+        }
+
         if (ContextCompat.checkSelfPermission(service, Manifest.permission.RECORD_AUDIO)
             != PackageManager.PERMISSION_GRANTED
         ) {
-            _recordingError.value = "Microphone permission not granted. Enable in Settings."
-            _recordingState.value = RecordingState.ERROR
+            showRecordingError("Microphone permission not granted. Enable in Settings.")
             return
         }
 
@@ -157,23 +175,34 @@ class InputViewModel(
             val audioFile = asrClient.stopApiRecording()
             if (audioFile != null && audioFile.exists()) {
                 val providerId = preferenceManager.getAsrProviderId()
-                val provider = preferenceManager.getProvider(providerId) ?: PreferenceManager.DEFAULT_PROVIDERS.first()
+                val provider = preferenceManager.getProvider(providerId)
                 val modelName = preferenceManager.getAsrModelName()
                 val language = preferenceManager.getAsrLanguage()
-                transcribeAudioFile(provider, modelName, language, audioFile)
+                if (provider == null || !provider.enabled) {
+                    showRecordingError("Voice provider is disabled or missing")
+                    if (audioFile.exists()) audioFile.delete()
+                } else {
+                    transcribeAudioFile(provider, modelName, language, audioFile)
+                }
             } else {
-                _recordingError.value = "Failed to record audio"
-                _recordingState.value = RecordingState.ERROR
+                showRecordingError("Failed to record audio")
             }
         } else {
             val started = asrClient.startApiRecording()
             if (started) {
+                recordingErrorResetJob?.cancel()
+                _recordingError.value = ""
                 _recordingState.value = RecordingState.RECORDING
             } else {
-                _recordingError.value = "Microphone initialization failed"
-                _recordingState.value = RecordingState.ERROR
+                showRecordingError("Microphone initialization failed")
             }
         }
+    }
+
+    fun onEmojiClick(emoji: String) {
+        preferenceManager.recordEmojiUse(emoji)
+        _recentEmojiCounts.value = preferenceManager.getEmojiRecentCounts()
+        service.currentInputConnection?.commitText(emoji, 1)
     }
 
     private fun commitCandidate(candidate: Candidate, learnAiSelection: Boolean) {
@@ -254,11 +283,28 @@ class InputViewModel(
                 service.currentInputConnection?.commitText(text, 1)
                 _recordingState.value = RecordingState.IDLE
             } else {
-                _recordingError.value = "ASR API transcription failed"
-                _recordingState.value = RecordingState.ERROR
+                showRecordingError("ASR API transcription failed")
             }
             if (file.exists()) file.delete()
         }
+    }
+
+    private fun showRecordingError(message: String) {
+        _recordingError.value = message
+        _recordingState.value = RecordingState.ERROR
+        recordingErrorResetJob?.cancel()
+        recordingErrorResetJob = viewModelScope.launch {
+            delay(RECORDING_ERROR_VISIBLE_MS)
+            if (_recordingState.value == RecordingState.ERROR && _recordingError.value == message) {
+                stopRecordingUi()
+            }
+        }
+    }
+
+    private fun stopRecordingUi() {
+        recordingErrorResetJob?.cancel()
+        _recordingError.value = ""
+        _recordingState.value = RecordingState.IDLE
     }
 
     override fun onCleared() {
@@ -267,6 +313,7 @@ class InputViewModel(
 
     companion object {
         private const val CONTEXT_CHAR_COUNT = 50
+        private const val RECORDING_ERROR_VISIBLE_MS = 1800L
 
         private fun isPinyinLetter(key: String): Boolean {
             return key.length == 1 && key[0].lowercaseChar() in 'a'..'z'

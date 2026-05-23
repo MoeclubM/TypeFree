@@ -13,7 +13,7 @@ data class Candidate(
 
 class PinyinEngine(context: Context, private val preferenceManager: PreferenceManager) {
     private val pinyinDict = PinyinDict(context, preferenceManager)
-    private val llmClient = LLMClient()
+    private val llmClient = LLMClient(preferenceManager)
     
     private val scope = CoroutineScope(Dispatchers.Main + SupervisorJob())
     private var localJob: Job? = null
@@ -58,15 +58,17 @@ class PinyinEngine(context: Context, private val preferenceManager: PreferenceMa
 
         if (preferenceManager.isPinyinLlmEnabled()) {
             val providerId = preferenceManager.getPinyinProviderId()
-            val provider = preferenceManager.getProvider(providerId) ?: PreferenceManager.DEFAULT_PROVIDERS.first()
+            val provider = preferenceManager.getProvider(providerId)
             val modelName = preferenceManager.getPinyinModelName()
+            if (provider == null || !provider.enabled) return
             
             llmJob = scope.launch {
                 try {
                     // Slight delay to avoid hammering the LLM while rapid typing (debounce)
                     delay(300)
                     
-                    val aiWords = llmClient.translatePinyin(provider, modelName, pinyin, contextText)
+                    val result = llmClient.translatePinyinWithPrediction(provider, modelName, pinyin, contextText)
+                    val aiWords = withPredictedNextWord(result)
                     if (aiWords.isNotEmpty() && latestPinyinInput == pinyin) {
                         latestAiCandidates = aiWords.map { Candidate(it, isAi = true) }
                         emitMergedCandidates(listener)
@@ -105,8 +107,12 @@ class PinyinEngine(context: Context, private val preferenceManager: PreferenceMa
         }
 
         val providerId = preferenceManager.getContextProviderId()
-        val provider = preferenceManager.getProvider(providerId) ?: PreferenceManager.DEFAULT_PROVIDERS.first()
+        val provider = preferenceManager.getProvider(providerId)
         val modelName = preferenceManager.getContextModelName()
+        if (provider == null || !provider.enabled) {
+            listener.onCandidatesUpdated(emptyList())
+            return
+        }
         
         llmJob = scope.launch {
             try {
@@ -134,10 +140,20 @@ class PinyinEngine(context: Context, private val preferenceManager: PreferenceMa
         listener.onCandidatesUpdated((latestAiCandidates + latestLocalCandidates).distinctBy { it.text })
     }
 
+    private fun withPredictedNextWord(result: AiPinyinResult): List<String> {
+        val first = result.candidates.firstOrNull()
+        val nextWord = result.firstCandidateNextWord.trim()
+        val combined = if (!first.isNullOrBlank() && nextWord.isNotBlank()) first + nextWord else ""
+        return (listOfNotNull(first) + listOf(combined) + result.candidates.drop(1))
+            .filter { it.isNotBlank() }
+            .distinct()
+    }
+
     private fun learnSelectedAiCandidate(sourcePinyin: String, selectedText: String, contextText: String) {
         val providerId = preferenceManager.getPinyinProviderId()
-        val provider = preferenceManager.getProvider(providerId) ?: PreferenceManager.DEFAULT_PROVIDERS.first()
+        val provider = preferenceManager.getProvider(providerId)
         val modelName = preferenceManager.getPinyinModelName()
+        if (provider == null || !provider.enabled) return
 
         scope.launch {
             try {
