@@ -15,7 +15,7 @@ data class ProviderConfig(
     val name: String,
     val baseUrl: String = "",
     val apiKey: String = "",
-    val type: String = "openai", // openai, openai_responses, anthropic, gemini, qwen_asr, volcengine_asr
+    val type: String = "openai", // openai, openai_responses, anthropic, gemini, openai_audio_asr, qwen_asr, volcengine_asr
     val enabled: Boolean = false,
     val models: List<String> = emptyList(),
     val thinkingBudget: Int = 0,
@@ -48,9 +48,21 @@ data class UserPinyinEntry(
 data class LocalUsageStats(
     val keyPressCount: Long = 0,
     val inputCharCount: Long = 0,
+    val modelRequestCount: Long = 0,
     val llmPromptTokens: Long = 0,
     val llmCompletionTokens: Long = 0,
     val llmTotalTokens: Long = 0
+)
+
+@Serializable
+data class ModelUsageStat(
+    val providerId: String,
+    val providerName: String,
+    val modelName: String,
+    val requestCount: Long = 0,
+    val promptTokens: Long = 0,
+    val completionTokens: Long = 0,
+    val totalTokens: Long = 0
 )
 
 @Serializable
@@ -141,6 +153,8 @@ class PreferenceManager(context: Context) {
         private const val KEY_AI_REQUEST_LOGS = "ai_request_logs_v1"
         private const val KEY_EMOJI_RECENT_COUNTS = "emoji_recent_counts_v1"
         private const val KEY_LOCAL_USAGE_STATS = "local_usage_stats_v1"
+        private const val KEY_KEY_PRESS_COUNTS = "key_press_counts_v1"
+        private const val KEY_MODEL_USAGE_STATS = "model_usage_stats_v1"
         private const val KEY_WORD_FREQUENCIES = "word_frequencies_v1"
         private const val KEY_ADVANCED_IME_SETTINGS = "advanced_ime_settings_v1"
 
@@ -220,6 +234,16 @@ class PreferenceManager(context: Context) {
                 )
             ),
             ProviderConfig(
+                id = "openai_audio_asr",
+                name = "OpenAI Audio ASR",
+                baseUrl = "https://api.openai.com/v1",
+                models = listOf("whisper-1"),
+                type = "openai_audio_asr",
+                capabilities = ProviderCapabilities(
+                    supportsAsr = true
+                )
+            ),
+            ProviderConfig(
                 id = "volcengine_doubao_asr",
                 name = "火山引擎豆包 ASR",
                 baseUrl = "https://openspeech.bytedance.com/api/v3/auc/bigmodel/recognize/flash",
@@ -264,7 +288,7 @@ class PreferenceManager(context: Context) {
     private fun normalizeProviders(providers: List<ProviderConfig>): List<ProviderConfig> {
         val normalized = providers.mapNotNull { provider ->
             when (provider.id) {
-                "openai", "anthropic", "deepseek", "gemini", "bailian", "bailian_qwen_asr", "volcengine_doubao_asr" ->
+                "openai", "anthropic", "deepseek", "gemini", "bailian", "bailian_qwen_asr", "openai_audio_asr", "volcengine_doubao_asr" ->
                     normalizeBuiltInProvider(provider, DEFAULT_PROVIDERS.first { it.id == provider.id })
                 "ollama" -> null
                 else -> provider
@@ -488,10 +512,35 @@ class PreferenceManager(context: Context) {
         }
     }
 
-    fun recordKeyPress(count: Long = 1) {
+    fun getKeyPressCounts(): Map<String, Long> {
+        val stored = plainPrefs.getString(KEY_KEY_PRESS_COUNTS, null) ?: return emptyMap()
+        return try {
+            json.decodeFromString<Map<String, Long>>(stored)
+                .filterValues { it > 0 }
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to decode key press counts", e)
+            emptyMap()
+        }
+    }
+
+    fun recordKeyPress(key: String = UNKNOWN_KEY_LABEL, count: Long = 1) {
         if (count <= 0) return
+        val normalizedKey = normalizeKeyPressLabel(key)
         val current = getLocalUsageStats()
         saveLocalUsageStats(current.copy(keyPressCount = current.keyPressCount + count))
+        val keyCounts = getKeyPressCounts().toMutableMap()
+        keyCounts[normalizedKey] = (keyCounts[normalizedKey] ?: 0L) + count
+        plainPrefs.edit()
+            .putString(
+                KEY_KEY_PRESS_COUNTS,
+                json.encodeToString(
+                    keyCounts.entries
+                        .sortedByDescending { it.value }
+                        .take(MAX_KEY_PRESS_COUNTS)
+                        .associate { it.key to it.value }
+                )
+            )
+            .apply()
     }
 
     fun recordCommittedText(text: String) {
@@ -513,8 +562,65 @@ class PreferenceManager(context: Context) {
         )
     }
 
+    fun getModelUsageStats(): List<ModelUsageStat> {
+        val stored = plainPrefs.getString(KEY_MODEL_USAGE_STATS, null) ?: return emptyList()
+        return try {
+            json.decodeFromString<List<ModelUsageStat>>(stored)
+                .filter { it.requestCount > 0 }
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to decode model usage stats", e)
+            emptyList()
+        }
+    }
+
+    fun recordLlmRequest(provider: ProviderConfig, modelName: String, usage: LlmTokenUsage?) {
+        recordModelRequest(provider, modelName, usage)
+    }
+
+    fun recordModelRequest(provider: ProviderConfig, modelName: String, usage: LlmTokenUsage? = null) {
+        val current = getLocalUsageStats()
+        saveLocalUsageStats(
+            current.copy(
+                modelRequestCount = current.modelRequestCount + 1,
+                llmPromptTokens = current.llmPromptTokens + (usage?.promptTokens ?: 0),
+                llmCompletionTokens = current.llmCompletionTokens + (usage?.completionTokens ?: 0),
+                llmTotalTokens = current.llmTotalTokens + (usage?.totalTokens ?: 0)
+            )
+        )
+
+        val modelKey = modelUsageKey(provider.id, modelName)
+        val stats = getModelUsageStats().associateBy { modelUsageKey(it.providerId, it.modelName) }.toMutableMap()
+        val currentModel = stats[modelKey] ?: ModelUsageStat(
+            providerId = provider.id,
+            providerName = provider.name,
+            modelName = modelName.ifBlank { DEFAULT_MODEL_LABEL }
+        )
+        stats[modelKey] = currentModel.copy(
+            providerName = provider.name,
+            modelName = modelName.ifBlank { DEFAULT_MODEL_LABEL },
+            requestCount = currentModel.requestCount + 1,
+            promptTokens = currentModel.promptTokens + (usage?.promptTokens ?: 0),
+            completionTokens = currentModel.completionTokens + (usage?.completionTokens ?: 0),
+            totalTokens = currentModel.totalTokens + (usage?.totalTokens ?: 0)
+        )
+        plainPrefs.edit()
+            .putString(
+                KEY_MODEL_USAGE_STATS,
+                json.encodeToString(
+                    stats.values
+                        .sortedWith(compareByDescending<ModelUsageStat> { it.requestCount }.thenByDescending { it.totalTokens })
+                        .take(MAX_MODEL_USAGE_STATS)
+                )
+            )
+            .apply()
+    }
+
     fun clearLocalUsageStats() {
-        plainPrefs.edit().remove(KEY_LOCAL_USAGE_STATS).apply()
+        plainPrefs.edit()
+            .remove(KEY_LOCAL_USAGE_STATS)
+            .remove(KEY_KEY_PRESS_COUNTS)
+            .remove(KEY_MODEL_USAGE_STATS)
+            .apply()
     }
 
     private fun saveLocalUsageStats(stats: LocalUsageStats) {
@@ -660,6 +766,19 @@ class PreferenceManager(context: Context) {
         return "\u0000$word"
     }
 
+    private fun normalizeKeyPressLabel(key: String): String {
+        val trimmed = key.trim()
+        return when {
+            key == " " -> "space"
+            trimmed.isBlank() -> UNKNOWN_KEY_LABEL
+            else -> trimmed
+        }
+    }
+
+    private fun modelUsageKey(providerId: String, modelName: String): String {
+        return "$providerId\u0000${modelName.ifBlank { DEFAULT_MODEL_LABEL }}"
+    }
+
     private fun sanitizeAdvancedImeSettings(settings: AdvancedImeSettings): AdvancedImeSettings {
         return settings.copy(
             aiCandidateDebounceMs = settings.aiCandidateDebounceMs.coerceIn(0, 5000),
@@ -746,4 +865,8 @@ class PreferenceManager(context: Context) {
         "deepseek-coder"
     )
 
+    private val UNKNOWN_KEY_LABEL = "unknown"
+    private val DEFAULT_MODEL_LABEL = "(default)"
+    private val MAX_KEY_PRESS_COUNTS = 500
+    private val MAX_MODEL_USAGE_STATS = 500
 }

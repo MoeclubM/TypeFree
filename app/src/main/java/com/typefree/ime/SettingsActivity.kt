@@ -61,6 +61,7 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.lifecycleScope
 import com.typefree.ime.data.AdvancedImeSettings
 import com.typefree.ime.data.LocalUsageStats
+import com.typefree.ime.data.ModelUsageStat
 import com.typefree.ime.data.ModelSettings
 import com.typefree.ime.data.PreferenceManager
 import com.typefree.ime.data.ProviderCapabilities
@@ -124,6 +125,11 @@ class SettingsActivity : ComponentActivity() {
                         selectedProviderId = null
                         refreshSnapshot()
                     },
+                    onOpenUsageStats = {
+                        currentScreen = Screen.USAGE_STATS
+                        selectedProviderId = null
+                        refreshSnapshot()
+                    },
                     onSaveAdvancedSettings = { saveAdvancedSettings(it) },
                     onResetAdvancedSettings = { resetAdvancedSettings() },
                     onSaveDebounceMs = { saveAiCandidateDebounceMs(it) },
@@ -183,6 +189,8 @@ class SettingsActivity : ComponentActivity() {
             voiceInputEnabled = preferenceManager.isVoiceInputEnabled(),
             aiRequestLogCount = preferenceManager.getAiRequestLogs().size,
             usageStats = preferenceManager.getLocalUsageStats(),
+            keyPressCounts = preferenceManager.getKeyPressCounts(),
+            modelUsageStats = preferenceManager.getModelUsageStats(),
             pinyinProviderId = preferenceManager.getPinyinProviderId(),
             pinyinModelName = preferenceManager.getPinyinModelName(),
             contextProviderId = preferenceManager.getContextProviderId(),
@@ -214,6 +222,10 @@ class SettingsActivity : ComponentActivity() {
                 refreshSnapshot()
             }
             Screen.LOCAL_DICTIONARY -> {
+                currentScreen = Screen.MAIN
+                refreshSnapshot()
+            }
+            Screen.USAGE_STATS -> {
                 currentScreen = Screen.MAIN
                 refreshSnapshot()
             }
@@ -409,11 +421,12 @@ private val TYPE_OPTIONS = listOf(
     "openai" to "OpenAI Chat / 兼容",
     "anthropic" to "Anthropic Messages",
     "gemini" to "Gemini generateContent",
+    "openai_audio_asr" to "OpenAI Audio Transcriptions",
     "qwen_asr" to "百炼 Qwen ASR",
     "volcengine_asr" to "火山豆包 ASR"
 )
 
-private val ASR_PROVIDER_TYPES = setOf("qwen_asr", "volcengine_asr")
+private val ASR_PROVIDER_TYPES = setOf("openai_audio_asr", "qwen_asr", "volcengine_asr")
 
 private data class SettingsSnapshot(
     val providers: List<ProviderConfig> = emptyList(),
@@ -425,6 +438,8 @@ private data class SettingsSnapshot(
     val voiceInputEnabled: Boolean = false,
     val aiRequestLogCount: Int = 0,
     val usageStats: LocalUsageStats = LocalUsageStats(),
+    val keyPressCounts: Map<String, Long> = emptyMap(),
+    val modelUsageStats: List<ModelUsageStat> = emptyList(),
     val pinyinProviderId: String = "openai",
     val pinyinModelName: String = "",
     val contextProviderId: String = "openai",
@@ -461,6 +476,7 @@ private enum class Screen {
     ASR_PROVIDERS,
     PROVIDER_DETAIL,
     LOCAL_DICTIONARY,
+    USAGE_STATS,
     ADVANCED_SETTINGS
 }
 
@@ -490,6 +506,7 @@ private fun SettingsApp(
     onToggleVoiceInput: (Boolean) -> Unit,
     onOpenDebounceSetting: () -> Unit,
     onOpenAdvancedSettings: () -> Unit,
+    onOpenUsageStats: () -> Unit,
     onSaveAdvancedSettings: (AdvancedImeSettings) -> Unit,
     onResetAdvancedSettings: () -> Unit,
     onSaveDebounceMs: (Int) -> Unit,
@@ -532,6 +549,7 @@ private fun SettingsApp(
                             Screen.ASR_PROVIDERS -> "语音识别服务商"
                             Screen.PROVIDER_DETAIL -> "编辑服务商"
                             Screen.LOCAL_DICTIONARY -> "本地词典"
+                            Screen.USAGE_STATS -> "使用统计"
                             Screen.ADVANCED_SETTINGS -> "高级设置"
                         },
                         fontWeight = FontWeight.SemiBold
@@ -563,6 +581,7 @@ private fun SettingsApp(
                 onToggleContextPrediction = onToggleContextPrediction,
                 onToggleVoiceInput = onToggleVoiceInput,
                 onOpenAdvancedSettings = onOpenAdvancedSettings,
+                onOpenUsageStats = onOpenUsageStats,
                 onOpenMapping = onOpenMapping,
                 onOpenChoice = onOpenChoice,
                 onOpenProviders = onOpenProviders,
@@ -600,13 +619,18 @@ private fun SettingsApp(
                 onImportDictionary = onImportDictionary,
                 onExportDictionary = onExportDictionary
             )
+            Screen.USAGE_STATS -> UsageStatsScreen(
+                modifier = Modifier.padding(padding),
+                usageStats = snapshot.usageStats,
+                keyPressCounts = snapshot.keyPressCounts,
+                modelUsageStats = snapshot.modelUsageStats,
+                onClearUsageStats = onClearUsageStats
+            )
             Screen.ADVANCED_SETTINGS -> AdvancedSettingsScreen(
                 modifier = Modifier.padding(padding),
                 settings = snapshot.advancedSettings,
-                usageStats = snapshot.usageStats,
                 onSave = onSaveAdvancedSettings,
-                onReset = onResetAdvancedSettings,
-                onClearUsageStats = onClearUsageStats
+                onReset = onResetAdvancedSettings
             )
         }
     }
@@ -656,6 +680,7 @@ private fun SettingsMainScreen(
     onToggleContextPrediction: (Boolean) -> Unit,
     onToggleVoiceInput: (Boolean) -> Unit,
     onOpenAdvancedSettings: () -> Unit,
+    onOpenUsageStats: () -> Unit,
     onOpenMapping: (MappingDialogState) -> Unit,
     onOpenChoice: (ChoiceDialogState) -> Unit,
     onOpenProviders: () -> Unit,
@@ -779,6 +804,12 @@ private fun SettingsMainScreen(
 
         SectionTitle("高级设置")
         ClickSettingRow(
+            title = "使用统计",
+            summary = usageStatsSummary(snapshot.usageStats)
+        ) {
+            onOpenUsageStats()
+        }
+        ClickSettingRow(
             title = "输入与模型高级参数",
             summary = advancedSettingsSummary(snapshot.advancedSettings, snapshot.usageStats)
         ) {
@@ -819,13 +850,122 @@ private fun SettingsMainScreen(
 }
 
 @Composable
+private fun UsageStatsScreen(
+    modifier: Modifier,
+    usageStats: LocalUsageStats,
+    keyPressCounts: Map<String, Long>,
+    modelUsageStats: List<ModelUsageStat>,
+    onClearUsageStats: () -> Unit
+) {
+    Column(
+        modifier = modifier
+            .verticalScroll(rememberScrollState())
+            .padding(horizontal = 18.dp, vertical = 12.dp),
+        verticalArrangement = Arrangement.spacedBy(12.dp)
+    ) {
+        SectionTitle("总览")
+        StatLine("按键次数", usageStats.keyPressCount.toString())
+        StatLine("输入字数", usageStats.inputCharCount.toString())
+        StatLine("模型请求", usageStats.modelRequestCount.toString())
+        StatLine("Token", "${usageStats.llmTotalTokens} (输入 ${usageStats.llmPromptTokens} / 输出 ${usageStats.llmCompletionTokens})")
+        Button(
+            onClick = onClearUsageStats,
+            enabled = usageStats != LocalUsageStats() || keyPressCounts.isNotEmpty() || modelUsageStats.isNotEmpty()
+        ) {
+            Text("清空统计")
+        }
+
+        SectionTitle("按键点击")
+        if (keyPressCounts.isEmpty()) {
+            Text(
+                text = "暂无按键统计。",
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+        } else {
+            keyPressCounts.entries
+                .sortedByDescending { it.value }
+                .forEach { entry ->
+                    StatLine(keyPressLabel(entry.key), entry.value.toString())
+                }
+        }
+
+        SectionTitle("模型请求")
+        if (modelUsageStats.isEmpty()) {
+            Text(
+                text = "暂无模型请求统计。",
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+        } else {
+            modelUsageStats
+                .sortedWith(compareByDescending<ModelUsageStat> { it.requestCount }.thenByDescending { it.totalTokens })
+                .forEach { stat ->
+                    Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainer)) {
+                        Column(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(14.dp),
+                            verticalArrangement = Arrangement.spacedBy(6.dp)
+                        ) {
+                            Text(
+                                text = "${stat.providerName} / ${stat.modelName}",
+                                style = MaterialTheme.typography.bodyLarge,
+                                fontWeight = FontWeight.Medium
+                            )
+                            Text(
+                                text = "请求 ${stat.requestCount} 次 | token ${stat.totalTokens} (输入 ${stat.promptTokens} / 输出 ${stat.completionTokens})",
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                    }
+                }
+        }
+    }
+}
+
+@Composable
+private fun StatLine(label: String, value: String) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(vertical = 6.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(12.dp)
+    ) {
+        Text(
+            text = label,
+            modifier = Modifier.weight(1f),
+            style = MaterialTheme.typography.bodyLarge
+        )
+        Text(
+            text = value,
+            style = MaterialTheme.typography.bodyLarge,
+            fontWeight = FontWeight.Medium
+        )
+    }
+    HorizontalDivider()
+}
+
+private fun keyPressLabel(key: String): String {
+    return when (key) {
+        "space" -> "空格"
+        "enter" -> "回车"
+        "backspace" -> "退格"
+        "lang" -> "中英切换"
+        "mic" -> "麦克风"
+        "candidate" -> "候选词"
+        else -> if (key.startsWith("emoji:")) "Emoji ${key.removePrefix("emoji:")}" else key
+    }
+}
+
+@Composable
 private fun AdvancedSettingsScreen(
     modifier: Modifier,
     settings: AdvancedImeSettings,
-    usageStats: LocalUsageStats,
     onSave: (AdvancedImeSettings) -> Unit,
-    onReset: () -> Unit,
-    onClearUsageStats: () -> Unit
+    onReset: () -> Unit
 ) {
     var aiCandidateDebounceMs by remember(settings) { mutableStateOf(settings.aiCandidateDebounceMs.toString()) }
     var contextBeforeChars by remember(settings) { mutableStateOf(settings.contextBeforeChars.toString()) }
@@ -852,19 +992,6 @@ private fun AdvancedSettingsScreen(
             .padding(horizontal = 18.dp, vertical = 12.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp)
     ) {
-        SectionTitle("本地统计")
-        Text(
-            text = usageStatsSummary(usageStats),
-            style = MaterialTheme.typography.bodyMedium,
-            color = MaterialTheme.colorScheme.onSurfaceVariant
-        )
-        Button(
-            onClick = onClearUsageStats,
-            enabled = usageStats != LocalUsageStats()
-        ) {
-            Text("清空本地统计")
-        }
-
         SectionTitle("上下文")
         AdvancedNumberField("光标前上下文字数", contextBeforeChars, "0-300") { contextBeforeChars = it }
         AdvancedNumberField("光标后上下文字数", contextAfterChars, "0-200") { contextAfterChars = it }
@@ -970,6 +1097,19 @@ private fun LocalDictionaryScreen(
 ) {
     var showAddDialog by remember { mutableStateOf(false) }
     var deletingEntry by remember { mutableStateOf<UserPinyinEntry?>(null) }
+    var searchQuery by remember { mutableStateOf("") }
+    val filteredEntries = remember(entries, searchQuery) {
+        val query = searchQuery.trim()
+        val pinyinQuery = query.lowercase(Locale.US).filter { it in 'a'..'z' }
+        if (query.isBlank()) {
+            entries
+        } else {
+            entries.filter { entry ->
+                entry.word.contains(query, ignoreCase = true) ||
+                    (pinyinQuery.isNotBlank() && entry.pinyin.contains(pinyinQuery))
+            }
+        }
+    }
     val importLauncher = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
         if (uri != null) onImportDictionary(uri)
     }
@@ -1012,14 +1152,22 @@ private fun LocalDictionaryScreen(
             color = MaterialTheme.colorScheme.onSurfaceVariant
         )
 
-        if (entries.isEmpty()) {
+        OutlinedTextField(
+            value = searchQuery,
+            onValueChange = { searchQuery = it },
+            modifier = Modifier.fillMaxWidth(),
+            label = { Text("搜索拼音或词语") },
+            singleLine = true
+        )
+
+        if (filteredEntries.isEmpty()) {
             Text(
-                text = "暂无用户词条。",
+                text = if (searchQuery.isBlank()) "暂无用户词条。" else "没有匹配的词条。",
                 style = MaterialTheme.typography.bodyMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
         } else {
-            entries
+            filteredEntries
                 .groupBy { it.pinyin }
                 .toSortedMap()
                 .forEach { (pinyin, words) ->
@@ -1872,6 +2020,7 @@ private fun AddProviderDialog(
                             baseUrl = baseUrl.trim(),
                             apiKey = apiKey.trim(),
                             type = type,
+                            models = defaultModelsForNewProvider(type),
                             capabilities = if (mode == ProviderListMode.ASR) {
                                 ProviderCapabilities(supportsAsr = true)
                             } else {
@@ -2055,6 +2204,15 @@ private fun providerTypeOptions(mode: ProviderListMode): List<Pair<String, Strin
             ProviderListMode.TEXT -> option.first !in ASR_PROVIDER_TYPES
             ProviderListMode.ASR -> option.first in ASR_PROVIDER_TYPES
         }
+    }
+}
+
+private fun defaultModelsForNewProvider(type: String): List<String> {
+    return when (type) {
+        "openai_audio_asr" -> listOf("whisper-1")
+        "qwen_asr" -> listOf("qwen3-asr-flash")
+        "volcengine_asr" -> listOf("volc.bigasr.auc_turbo")
+        else -> emptyList()
     }
 }
 

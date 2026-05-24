@@ -285,10 +285,12 @@ class LLMClientTest {
     @Test
     fun filtersNonTextModelsFromDetectedLists() {
         val provider = ProviderConfig(id = "openai", name = "OpenAI", type = "openai_responses")
+        val asrProvider = ProviderConfig(id = "audio_asr", name = "Audio ASR", type = "openai_audio_asr")
 
         assertTrue(client.isSupportedStructuredModel(provider, "gpt-5.4-mini"))
         assertFalse(client.isSupportedStructuredModel(provider, "text-embedding-3-small"))
         assertFalse(client.isSupportedStructuredModel(provider, "qwen3-asr-flash"))
+        assertFalse(client.isSupportedStructuredModel(asrProvider, "whisper-1"))
     }
 
     private fun parseObject(value: String) = json.parseToJsonElement(value).jsonObject

@@ -17,6 +17,7 @@ import android.view.MotionEvent
 import android.view.View
 import android.widget.HorizontalScrollView
 import android.widget.ImageButton
+import android.widget.FrameLayout
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
@@ -88,6 +89,7 @@ class NativeKeyboardView(context: Context) : LinearLayout(context) {
     }
 
     private val toolbarHost = LinearLayout(context)
+    private val topOverlayHost = FrameLayout(context)
     private val candidateHost = LinearLayout(context)
     private val pinyinText = TextView(context)
     private val rowsHost = LinearLayout(context)
@@ -110,8 +112,15 @@ class NativeKeyboardView(context: Context) : LinearLayout(context) {
             insets
         }
 
-        addView(
+        topOverlayHost.addView(
             toolbarHost,
+            FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT,
+                FrameLayout.LayoutParams.MATCH_PARENT
+            )
+        )
+        addView(
+            topOverlayHost,
             LayoutParams(LayoutParams.MATCH_PARENT, dp(42)).apply {
                 bottomMargin = dp(4)
             }
@@ -148,11 +157,13 @@ class NativeKeyboardView(context: Context) : LinearLayout(context) {
                 else -> true
             }
         }
-        addView(
+        topOverlayHost.addView(
             pinyinText,
-            LayoutParams(LayoutParams.MATCH_PARENT, dp(34)).apply {
-                bottomMargin = dp(4)
-            }
+            FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT,
+                dp(34),
+                Gravity.TOP
+            )
         )
 
         candidateHost.visibility = GONE
@@ -320,6 +331,7 @@ class NativeKeyboardView(context: Context) : LinearLayout(context) {
 
     private fun renderTopVisibility() {
         val composing = isComposing()
+        topOverlayHost.visibility = VISIBLE
         toolbarHost.visibility = if (composing) GONE else VISIBLE
         pinyinText.visibility = if (composing) VISIBLE else GONE
         candidateHost.visibility = if (

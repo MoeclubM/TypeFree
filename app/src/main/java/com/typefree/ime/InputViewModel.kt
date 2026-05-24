@@ -74,7 +74,7 @@ class InputViewModel(
 
     fun onKeyClick(key: String) {
         val ic = service.currentInputConnection ?: return
-        preferenceManager.recordKeyPress()
+        recordKeyPress(key)
         if (_isChinese.value) {
             if (isPinyinLetter(key)) {
                 insertPinyinLetter(key.lowercase())
@@ -93,7 +93,7 @@ class InputViewModel(
 
     fun onBackspace() {
         val ic = service.currentInputConnection ?: return
-        preferenceManager.recordKeyPress()
+        recordKeyPress("backspace")
         if (_isChinese.value && _pinyinBuffer.value.isNotEmpty()) {
             val cursor = _pinyinCursor.value.coerceIn(0, _pinyinBuffer.value.length)
             if (cursor > 0) {
@@ -110,7 +110,7 @@ class InputViewModel(
 
     fun onSpace() {
         val ic = service.currentInputConnection ?: return
-        preferenceManager.recordKeyPress()
+        recordKeyPress("space")
         val currentCandidates = _candidates.value
         val commitCandidate = currentCandidates.firstOrNull { !it.isPlaceholder }
         if (_isChinese.value && commitCandidate != null) {
@@ -135,7 +135,7 @@ class InputViewModel(
 
     fun onEnter() {
         val ic = service.currentInputConnection ?: return
-        preferenceManager.recordKeyPress()
+        recordKeyPress("enter")
         if (_isChinese.value && _pinyinBuffer.value.isNotEmpty()) {
             val nextContext = getContextBeforeCursor() + _pinyinBuffer.value
             commitTextAndTrack(ic, _pinyinBuffer.value, 1)
@@ -151,7 +151,7 @@ class InputViewModel(
 
     fun onCandidateClick(candidate: Candidate) {
         if (candidate.isPlaceholder) return
-        preferenceManager.recordKeyPress()
+        recordKeyPress("candidate")
         commitCandidate(candidate, learnAiSelection = true)
     }
 
@@ -162,6 +162,7 @@ class InputViewModel(
     }
 
     fun onToggleLanguage() {
+        recordKeyPress("lang")
         _isChinese.value = !_isChinese.value
         _pinyinBuffer.value = ""
         _pinyinCursor.value = 0
@@ -170,6 +171,7 @@ class InputViewModel(
     }
 
     fun onMicClick() {
+        recordKeyPress("mic")
         if (!preferenceManager.isVoiceInputEnabled()) {
             stopRecordingUi()
             return
@@ -194,6 +196,7 @@ class InputViewModel(
                     showRecordingError("Voice provider is disabled or missing")
                     if (audioFile.exists()) audioFile.delete()
                 } else {
+                    preferenceManager.recordModelRequest(provider, modelName)
                     transcribeAudioFile(provider, modelName, language, audioFile)
                 }
             } else {
@@ -212,7 +215,7 @@ class InputViewModel(
     }
 
     fun onEmojiClick(emoji: String) {
-        preferenceManager.recordKeyPress()
+        recordKeyPress("emoji:$emoji")
         preferenceManager.recordEmojiUse(emoji)
         _recentEmojiCounts.value = preferenceManager.getEmojiRecentCounts()
         service.currentInputConnection?.let { commitTextAndTrack(it, emoji, 1) }
@@ -259,6 +262,18 @@ class InputViewModel(
         _pinyinCursor.value = 0
         _candidates.value = emptyList()
         return committed
+    }
+
+    private fun recordKeyPress(key: String) {
+        preferenceManager.recordKeyPress(keyStatisticLabel(key))
+    }
+
+    private fun keyStatisticLabel(key: String): String {
+        return if (key.length == 1 && key[0] in 'A'..'Z') {
+            key.lowercase()
+        } else {
+            key
+        }
     }
 
     private fun updatePinyinCandidates() {

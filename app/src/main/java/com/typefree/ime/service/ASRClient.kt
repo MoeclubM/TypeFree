@@ -75,6 +75,8 @@ class ASRClient(private val context: Context) {
         if (!file.exists()) return@withContext null
 
         return@withContext when {
+            provider.type == "openai_audio_asr" ->
+                transcribeOpenAiAudio(provider, modelName, language, file)
             provider.type == "qwen_asr" || modelName.contains("qwen", ignoreCase = true) && modelName.contains("asr", ignoreCase = true) ->
                 transcribeQwenAsr(provider, modelName, language, file)
             provider.type == "volcengine_asr" ->

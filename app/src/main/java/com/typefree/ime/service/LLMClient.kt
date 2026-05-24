@@ -310,6 +310,11 @@ class LLMClient(private val preferenceManager: PreferenceManager? = null) {
         try {
             when (provider.type) {
                 "gemini" -> detectGemini(provider)
+                "openai_audio_asr" -> ProviderDetectionResult(
+                    models = provider.models.ifEmpty { listOf("whisper-1") },
+                    capabilities = ProviderCapabilities(supportsAsr = true),
+                    message = "OpenAI-compatible audio transcription uses /audio/transcriptions."
+                )
                 "qwen_asr" -> ProviderDetectionResult(
                     models = provider.models.ifEmpty { listOf("qwen3-asr-flash") },
                     capabilities = ProviderCapabilities(supportsAsr = true),
@@ -1388,7 +1393,7 @@ class LLMClient(private val preferenceManager: PreferenceManager? = null) {
 
     internal fun isSupportedStructuredModel(provider: ProviderConfig, modelName: String): Boolean {
         if (modelName.isBlank()) return false
-        if (provider.type == "qwen_asr" || provider.type == "volcengine_asr") return false
+        if (provider.type == "openai_audio_asr" || provider.type == "qwen_asr" || provider.type == "volcengine_asr") return false
 
         val normalized = normalizedModel(modelName)
         val unsupportedTokens = listOf(
@@ -1628,7 +1633,7 @@ class LLMClient(private val preferenceManager: PreferenceManager? = null) {
         error: String?,
         tokenUsage: LlmTokenUsage? = null
     ) {
-        preferenceManager?.recordLlmTokenUsage(tokenUsage)
+        preferenceManager?.recordLlmRequest(provider, modelName, tokenUsage)
         preferenceManager?.appendAiRequestLog(
             AiRequestLog(
                 timestampMs = System.currentTimeMillis(),
