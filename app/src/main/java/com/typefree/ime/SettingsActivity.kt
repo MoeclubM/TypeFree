@@ -59,6 +59,8 @@ import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.lifecycleScope
+import com.typefree.ime.data.AdvancedImeSettings
+import com.typefree.ime.data.LocalUsageStats
 import com.typefree.ime.data.ModelSettings
 import com.typefree.ime.data.PreferenceManager
 import com.typefree.ime.data.ProviderCapabilities
@@ -117,6 +119,13 @@ class SettingsActivity : ComponentActivity() {
                         refreshSnapshot()
                     },
                     onOpenDebounceSetting = { showDebounceDialog = true },
+                    onOpenAdvancedSettings = {
+                        currentScreen = Screen.ADVANCED_SETTINGS
+                        selectedProviderId = null
+                        refreshSnapshot()
+                    },
+                    onSaveAdvancedSettings = { saveAdvancedSettings(it) },
+                    onResetAdvancedSettings = { resetAdvancedSettings() },
                     onSaveDebounceMs = { saveAiCandidateDebounceMs(it) },
                     onDismissDebounce = { showDebounceDialog = false },
                     onOpenMapping = { mappingDialog = it },
@@ -156,7 +165,8 @@ class SettingsActivity : ComponentActivity() {
                     onImportDictionary = { uri -> importDictionary(uri) },
                     onExportDictionary = { uri -> exportDictionary(uri) },
                     onExportAiLogs = { uri -> exportAiLogs(uri) },
-                    onClearAiLogs = { clearAiLogs() }
+                    onClearAiLogs = { clearAiLogs() },
+                    onClearUsageStats = { clearUsageStats() }
                 )
             }
         }
@@ -168,9 +178,11 @@ class SettingsActivity : ComponentActivity() {
             userPinyinEntries = preferenceManager.getUserPinyinEntries(),
             pinyinLlmEnabled = preferenceManager.isPinyinLlmEnabled(),
             contextPredictionEnabled = preferenceManager.isContextPredictionEnabled(),
+            advancedSettings = preferenceManager.getAdvancedImeSettings(),
             aiCandidateDebounceMs = preferenceManager.getAiCandidateDebounceMs(),
             voiceInputEnabled = preferenceManager.isVoiceInputEnabled(),
             aiRequestLogCount = preferenceManager.getAiRequestLogs().size,
+            usageStats = preferenceManager.getLocalUsageStats(),
             pinyinProviderId = preferenceManager.getPinyinProviderId(),
             pinyinModelName = preferenceManager.getPinyinModelName(),
             contextProviderId = preferenceManager.getContextProviderId(),
@@ -202,6 +214,10 @@ class SettingsActivity : ComponentActivity() {
                 refreshSnapshot()
             }
             Screen.LOCAL_DICTIONARY -> {
+                currentScreen = Screen.MAIN
+                refreshSnapshot()
+            }
+            Screen.ADVANCED_SETTINGS -> {
                 currentScreen = Screen.MAIN
                 refreshSnapshot()
             }
@@ -239,6 +255,18 @@ class SettingsActivity : ComponentActivity() {
         preferenceManager.setAiCandidateDebounceMs(value)
         showDebounceDialog = false
         refreshSnapshot()
+    }
+
+    private fun saveAdvancedSettings(settings: AdvancedImeSettings) {
+        preferenceManager.saveAdvancedImeSettings(settings)
+        refreshSnapshot()
+        Toast.makeText(this, "高级设置已保存", Toast.LENGTH_SHORT).show()
+    }
+
+    private fun resetAdvancedSettings() {
+        preferenceManager.resetAdvancedImeSettings()
+        refreshSnapshot()
+        Toast.makeText(this, "高级设置已恢复默认", Toast.LENGTH_SHORT).show()
     }
 
     private fun addProvider(provider: ProviderConfig) {
@@ -368,6 +396,12 @@ class SettingsActivity : ComponentActivity() {
         Toast.makeText(this, "AI 请求日志已清空", Toast.LENGTH_SHORT).show()
     }
 
+    private fun clearUsageStats() {
+        preferenceManager.clearLocalUsageStats()
+        refreshSnapshot()
+        Toast.makeText(this, "本地统计已清空", Toast.LENGTH_SHORT).show()
+    }
+
 }
 
 private val TYPE_OPTIONS = listOf(
@@ -386,9 +420,11 @@ private data class SettingsSnapshot(
     val userPinyinEntries: List<UserPinyinEntry> = emptyList(),
     val pinyinLlmEnabled: Boolean = true,
     val contextPredictionEnabled: Boolean = true,
+    val advancedSettings: AdvancedImeSettings = AdvancedImeSettings(),
     val aiCandidateDebounceMs: Int = 300,
     val voiceInputEnabled: Boolean = false,
     val aiRequestLogCount: Int = 0,
+    val usageStats: LocalUsageStats = LocalUsageStats(),
     val pinyinProviderId: String = "openai",
     val pinyinModelName: String = "",
     val contextProviderId: String = "openai",
@@ -424,7 +460,8 @@ private enum class Screen {
     TEXT_PROVIDERS,
     ASR_PROVIDERS,
     PROVIDER_DETAIL,
-    LOCAL_DICTIONARY
+    LOCAL_DICTIONARY,
+    ADVANCED_SETTINGS
 }
 
 private enum class BindingTarget {
@@ -452,6 +489,9 @@ private fun SettingsApp(
     onToggleContextPrediction: (Boolean) -> Unit,
     onToggleVoiceInput: (Boolean) -> Unit,
     onOpenDebounceSetting: () -> Unit,
+    onOpenAdvancedSettings: () -> Unit,
+    onSaveAdvancedSettings: (AdvancedImeSettings) -> Unit,
+    onResetAdvancedSettings: () -> Unit,
     onSaveDebounceMs: (Int) -> Unit,
     onDismissDebounce: () -> Unit,
     onOpenMapping: (MappingDialogState) -> Unit,
@@ -476,7 +516,8 @@ private fun SettingsApp(
     onImportDictionary: (Uri) -> Unit,
     onExportDictionary: (Uri) -> Unit,
     onExportAiLogs: (Uri) -> Unit,
-    onClearAiLogs: () -> Unit
+    onClearAiLogs: () -> Unit,
+    onClearUsageStats: () -> Unit
 ) {
     Scaffold(
         modifier = Modifier.fillMaxSize(),
@@ -491,6 +532,7 @@ private fun SettingsApp(
                             Screen.ASR_PROVIDERS -> "语音识别服务商"
                             Screen.PROVIDER_DETAIL -> "编辑服务商"
                             Screen.LOCAL_DICTIONARY -> "本地词典"
+                            Screen.ADVANCED_SETTINGS -> "高级设置"
                         },
                         fontWeight = FontWeight.SemiBold
                     )
@@ -520,14 +562,15 @@ private fun SettingsApp(
                 onTogglePinyinAi = onTogglePinyinAi,
                 onToggleContextPrediction = onToggleContextPrediction,
                 onToggleVoiceInput = onToggleVoiceInput,
-                onOpenDebounceSetting = onOpenDebounceSetting,
+                onOpenAdvancedSettings = onOpenAdvancedSettings,
                 onOpenMapping = onOpenMapping,
                 onOpenChoice = onOpenChoice,
                 onOpenProviders = onOpenProviders,
                 onOpenAsrProviders = onOpenAsrProviders,
                 onOpenLocalDictionary = onOpenLocalDictionary,
                 onExportAiLogs = onExportAiLogs,
-                onClearAiLogs = onClearAiLogs
+                onClearAiLogs = onClearAiLogs,
+                onClearUsageStats = onClearUsageStats
             )
             Screen.TEXT_PROVIDERS -> ProvidersScreen(
                 modifier = Modifier.padding(padding),
@@ -556,6 +599,14 @@ private fun SettingsApp(
                 onDeleteEntry = onDeleteDictionaryEntry,
                 onImportDictionary = onImportDictionary,
                 onExportDictionary = onExportDictionary
+            )
+            Screen.ADVANCED_SETTINGS -> AdvancedSettingsScreen(
+                modifier = Modifier.padding(padding),
+                settings = snapshot.advancedSettings,
+                usageStats = snapshot.usageStats,
+                onSave = onSaveAdvancedSettings,
+                onReset = onResetAdvancedSettings,
+                onClearUsageStats = onClearUsageStats
             )
         }
     }
@@ -604,14 +655,15 @@ private fun SettingsMainScreen(
     onTogglePinyinAi: (Boolean) -> Unit,
     onToggleContextPrediction: (Boolean) -> Unit,
     onToggleVoiceInput: (Boolean) -> Unit,
-    onOpenDebounceSetting: () -> Unit,
+    onOpenAdvancedSettings: () -> Unit,
     onOpenMapping: (MappingDialogState) -> Unit,
     onOpenChoice: (ChoiceDialogState) -> Unit,
     onOpenProviders: () -> Unit,
     onOpenAsrProviders: () -> Unit,
     onOpenLocalDictionary: () -> Unit,
     onExportAiLogs: (Uri) -> Unit,
-    onClearAiLogs: () -> Unit
+    onClearAiLogs: () -> Unit,
+    onClearUsageStats: () -> Unit
 ) {
     var testText by remember { mutableStateOf("") }
     val aiLogsExportLauncher = rememberLauncherForActivityResult(
@@ -648,13 +700,6 @@ private fun SettingsMainScreen(
             checked = snapshot.contextPredictionEnabled,
             onCheckedChange = onToggleContextPrediction
         )
-        ClickSettingRow(
-            title = "AI 候选等待",
-            summary = "输入停顿 ${debounceSummary(snapshot.aiCandidateDebounceMs)} 后请求模型；0 表示不等待。"
-        ) {
-            onOpenDebounceSetting()
-        }
-
         SectionTitle("模型功能绑定")
         ClickSettingRow(
             title = "AI 候选词模型",
@@ -732,6 +777,14 @@ private fun SettingsMainScreen(
             onOpenAsrProviders()
         }
 
+        SectionTitle("高级设置")
+        ClickSettingRow(
+            title = "输入与模型高级参数",
+            summary = advancedSettingsSummary(snapshot.advancedSettings, snapshot.usageStats)
+        ) {
+            onOpenAdvancedSettings()
+        }
+
         SectionTitle("本地词典")
         ClickSettingRow(
             title = "管理本地词典",
@@ -763,6 +816,147 @@ private fun SettingsMainScreen(
             color = MaterialTheme.colorScheme.onSurfaceVariant
         )
     }
+}
+
+@Composable
+private fun AdvancedSettingsScreen(
+    modifier: Modifier,
+    settings: AdvancedImeSettings,
+    usageStats: LocalUsageStats,
+    onSave: (AdvancedImeSettings) -> Unit,
+    onReset: () -> Unit,
+    onClearUsageStats: () -> Unit
+) {
+    var aiCandidateDebounceMs by remember(settings) { mutableStateOf(settings.aiCandidateDebounceMs.toString()) }
+    var contextBeforeChars by remember(settings) { mutableStateOf(settings.contextBeforeChars.toString()) }
+    var contextAfterChars by remember(settings) { mutableStateOf(settings.contextAfterChars.toString()) }
+    var aiCandidateLimit by remember(settings) { mutableStateOf(settings.aiCandidateLimit.toString()) }
+    var learnedEntryLimit by remember(settings) { mutableStateOf(settings.learnedEntryLimit.toString()) }
+    var localCandidateLimit by remember(settings) { mutableStateOf(settings.localCandidateLimit.toString()) }
+    var partCandidateLimit by remember(settings) { mutableStateOf(settings.partCandidateLimit.toString()) }
+    var prefixKeyLimit by remember(settings) { mutableStateOf(settings.prefixKeyLimit.toString()) }
+    var prefixWordLimit by remember(settings) { mutableStateOf(settings.prefixWordLimit.toString()) }
+    var maxComposedSegments by remember(settings) { mutableStateOf(settings.maxComposedSegments.toString()) }
+    var maxComposedCandidates by remember(settings) { mutableStateOf(settings.maxComposedCandidates.toString()) }
+    var acronymCandidateLimit by remember(settings) { mutableStateOf(settings.acronymCandidateLimit.toString()) }
+    var maxAiRequestLogs by remember(settings) { mutableStateOf(settings.maxAiRequestLogs.toString()) }
+    var maxRecentEmoji by remember(settings) { mutableStateOf(settings.maxRecentEmoji.toString()) }
+    var maxWordFrequencies by remember(settings) { mutableStateOf(settings.maxWordFrequencies.toString()) }
+    var llmConnectTimeoutSeconds by remember(settings) { mutableStateOf(settings.llmConnectTimeoutSeconds.toString()) }
+    var llmReadTimeoutSeconds by remember(settings) { mutableStateOf(settings.llmReadTimeoutSeconds.toString()) }
+    var llmWriteTimeoutSeconds by remember(settings) { mutableStateOf(settings.llmWriteTimeoutSeconds.toString()) }
+
+    Column(
+        modifier = modifier
+            .verticalScroll(rememberScrollState())
+            .padding(horizontal = 18.dp, vertical = 12.dp),
+        verticalArrangement = Arrangement.spacedBy(12.dp)
+    ) {
+        SectionTitle("本地统计")
+        Text(
+            text = usageStatsSummary(usageStats),
+            style = MaterialTheme.typography.bodyMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
+        Button(
+            onClick = onClearUsageStats,
+            enabled = usageStats != LocalUsageStats()
+        ) {
+            Text("清空本地统计")
+        }
+
+        SectionTitle("上下文")
+        AdvancedNumberField("光标前上下文字数", contextBeforeChars, "0-300") { contextBeforeChars = it }
+        AdvancedNumberField("光标后上下文字数", contextAfterChars, "0-200") { contextAfterChars = it }
+
+        SectionTitle("AI 候选")
+        AdvancedNumberField("AI 候选等待毫秒", aiCandidateDebounceMs, "0-5000") { aiCandidateDebounceMs = it }
+        AdvancedNumberField("AI 返回候选上限", aiCandidateLimit, "1-20") { aiCandidateLimit = it }
+        AdvancedNumberField("单次 AI 学词上限", learnedEntryLimit, "1-50") { learnedEntryLimit = it }
+
+        SectionTitle("本地候选")
+        AdvancedNumberField("本地候选上限", localCandidateLimit, "1-120") { localCandidateLimit = it }
+        AdvancedNumberField("每段拼音候选数", partCandidateLimit, "1-20") { partCandidateLimit = it }
+        AdvancedNumberField("前缀扫描拼音键数", prefixKeyLimit, "1-120") { prefixKeyLimit = it }
+        AdvancedNumberField("前缀补全词数", prefixWordLimit, "1-120") { prefixWordLimit = it }
+        AdvancedNumberField("长拼音组合段数", maxComposedSegments, "1-20") { maxComposedSegments = it }
+        AdvancedNumberField("组合候选上限", maxComposedCandidates, "1-240") { maxComposedCandidates = it }
+        AdvancedNumberField("首字母候选上限", acronymCandidateLimit, "1-120") { acronymCandidateLimit = it }
+
+        SectionTitle("容量")
+        AdvancedNumberField("AI 请求日志保留数", maxAiRequestLogs, "0-5000") { maxAiRequestLogs = it }
+        AdvancedNumberField("最近 Emoji 保留数", maxRecentEmoji, "0-500") { maxRecentEmoji = it }
+        AdvancedNumberField("词频记录保留数", maxWordFrequencies, "0-10000") { maxWordFrequencies = it }
+
+        SectionTitle("网络超时")
+        AdvancedNumberField("LLM 连接超时秒", llmConnectTimeoutSeconds, "1-60") { llmConnectTimeoutSeconds = it }
+        AdvancedNumberField("LLM 读取超时秒", llmReadTimeoutSeconds, "1-120") { llmReadTimeoutSeconds = it }
+        AdvancedNumberField("LLM 写入超时秒", llmWriteTimeoutSeconds, "1-60") { llmWriteTimeoutSeconds = it }
+
+        Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+            Button(
+                onClick = {
+                    onSave(
+                        AdvancedImeSettings(
+                            aiCandidateDebounceMs = aiCandidateDebounceMs.toAdvancedInt(settings.aiCandidateDebounceMs),
+                            contextBeforeChars = contextBeforeChars.toAdvancedInt(settings.contextBeforeChars),
+                            contextAfterChars = contextAfterChars.toAdvancedInt(settings.contextAfterChars),
+                            aiCandidateLimit = aiCandidateLimit.toAdvancedInt(settings.aiCandidateLimit),
+                            learnedEntryLimit = learnedEntryLimit.toAdvancedInt(settings.learnedEntryLimit),
+                            localCandidateLimit = localCandidateLimit.toAdvancedInt(settings.localCandidateLimit),
+                            partCandidateLimit = partCandidateLimit.toAdvancedInt(settings.partCandidateLimit),
+                            prefixKeyLimit = prefixKeyLimit.toAdvancedInt(settings.prefixKeyLimit),
+                            prefixWordLimit = prefixWordLimit.toAdvancedInt(settings.prefixWordLimit),
+                            maxComposedSegments = maxComposedSegments.toAdvancedInt(settings.maxComposedSegments),
+                            maxComposedCandidates = maxComposedCandidates.toAdvancedInt(settings.maxComposedCandidates),
+                            acronymCandidateLimit = acronymCandidateLimit.toAdvancedInt(settings.acronymCandidateLimit),
+                            maxAiRequestLogs = maxAiRequestLogs.toAdvancedInt(settings.maxAiRequestLogs),
+                            maxRecentEmoji = maxRecentEmoji.toAdvancedInt(settings.maxRecentEmoji),
+                            maxWordFrequencies = maxWordFrequencies.toAdvancedInt(settings.maxWordFrequencies),
+                            llmConnectTimeoutSeconds = llmConnectTimeoutSeconds.toAdvancedInt(settings.llmConnectTimeoutSeconds),
+                            llmReadTimeoutSeconds = llmReadTimeoutSeconds.toAdvancedInt(settings.llmReadTimeoutSeconds),
+                            llmWriteTimeoutSeconds = llmWriteTimeoutSeconds.toAdvancedInt(settings.llmWriteTimeoutSeconds)
+                        )
+                    )
+                },
+                modifier = Modifier.weight(1f)
+            ) {
+                Text("保存")
+            }
+            Button(
+                onClick = onReset,
+                modifier = Modifier.weight(1f)
+            ) {
+                Text("恢复默认")
+            }
+        }
+    }
+}
+
+@Composable
+private fun AdvancedNumberField(
+    label: String,
+    value: String,
+    rangeText: String,
+    onValueChange: (String) -> Unit
+) {
+    OutlinedTextField(
+        value = value,
+        onValueChange = { input -> onValueChange(input.filter { it.isDigit() }.take(5)) },
+        modifier = Modifier.fillMaxWidth(),
+        label = { Text(label) },
+        supportingText = { Text(rangeText) },
+        singleLine = true,
+        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number)
+    )
+}
+
+private fun String.toAdvancedInt(defaultValue: Int): Int {
+    return toIntOrNull() ?: defaultValue
+}
+
+private fun usageStatsSummary(stats: LocalUsageStats): String {
+    return "按键 ${stats.keyPressCount} 次 | 输入 ${stats.inputCharCount} 字 | LLM token ${stats.llmTotalTokens} (输入 ${stats.llmPromptTokens} / 输出 ${stats.llmCompletionTokens})"
 }
 
 @Composable
@@ -1835,6 +2029,10 @@ private fun bindingSummary(snapshot: SettingsSnapshot, providerId: String, model
     return listOf("$providerName / $modelLabel", readiness)
         .filter { it.isNotBlank() }
         .joinToString(" | ")
+}
+
+private fun advancedSettingsSummary(settings: AdvancedImeSettings, stats: LocalUsageStats): String {
+    return "等待 ${settings.aiCandidateDebounceMs}ms | 上下文 ${settings.contextBeforeChars}/${settings.contextAfterChars} 字 | 本地候选 ${settings.localCandidateLimit} | token ${stats.llmTotalTokens}"
 }
 
 private fun providerReadiness(provider: ProviderConfig): String {

@@ -74,24 +74,26 @@ class InputViewModel(
 
     fun onKeyClick(key: String) {
         val ic = service.currentInputConnection ?: return
+        preferenceManager.recordKeyPress()
         if (_isChinese.value) {
             if (isPinyinLetter(key)) {
                 insertPinyinLetter(key.lowercase())
                 updatePinyinCandidates()
             } else {
-                val contextBeforeInput = getTypingContext()
+                val contextBeforeInput = getContextBeforeCursor()
                 val committedComposition = commitPendingComposition()
-                ic.commitText(key, 1)
+                commitTextAndTrack(ic, key, 1)
                 fetchContextPredictions(contextBeforeInput + committedComposition + key)
             }
         } else {
-            ic.commitText(key, 1)
+            commitTextAndTrack(ic, key, 1)
             fetchContextPredictions()
         }
     }
 
     fun onBackspace() {
         val ic = service.currentInputConnection ?: return
+        preferenceManager.recordKeyPress()
         if (_isChinese.value && _pinyinBuffer.value.isNotEmpty()) {
             val cursor = _pinyinCursor.value.coerceIn(0, _pinyinBuffer.value.length)
             if (cursor > 0) {
@@ -108,21 +110,22 @@ class InputViewModel(
 
     fun onSpace() {
         val ic = service.currentInputConnection ?: return
+        preferenceManager.recordKeyPress()
         val currentCandidates = _candidates.value
         val commitCandidate = currentCandidates.firstOrNull { !it.isPlaceholder }
         if (_isChinese.value && commitCandidate != null) {
             commitCandidate(commitCandidate, learnAiSelection = true)
         } else if (_isChinese.value && _pinyinBuffer.value.isNotEmpty()) {
-            val nextContext = getTypingContext() + _pinyinBuffer.value + " "
-            ic.commitText(_pinyinBuffer.value, 1)
+            val nextContext = getContextBeforeCursor() + _pinyinBuffer.value + " "
+            commitTextAndTrack(ic, _pinyinBuffer.value, 1)
             _pinyinBuffer.value = ""
             _pinyinCursor.value = 0
             _candidates.value = emptyList()
-            ic.commitText(" ", 1)
+            commitTextAndTrack(ic, " ", 1)
             fetchContextPredictions(nextContext)
         } else {
-            val nextContext = getTypingContext() + " "
-            ic.commitText(" ", 1)
+            val nextContext = getContextBeforeCursor() + " "
+            commitTextAndTrack(ic, " ", 1)
             _pinyinBuffer.value = ""
             _pinyinCursor.value = 0
             _candidates.value = emptyList()
@@ -132,9 +135,10 @@ class InputViewModel(
 
     fun onEnter() {
         val ic = service.currentInputConnection ?: return
+        preferenceManager.recordKeyPress()
         if (_isChinese.value && _pinyinBuffer.value.isNotEmpty()) {
-            val nextContext = getTypingContext() + _pinyinBuffer.value
-            ic.commitText(_pinyinBuffer.value, 1)
+            val nextContext = getContextBeforeCursor() + _pinyinBuffer.value
+            commitTextAndTrack(ic, _pinyinBuffer.value, 1)
             _pinyinBuffer.value = ""
             _pinyinCursor.value = 0
             _candidates.value = emptyList()
@@ -147,6 +151,7 @@ class InputViewModel(
 
     fun onCandidateClick(candidate: Candidate) {
         if (candidate.isPlaceholder) return
+        preferenceManager.recordKeyPress()
         commitCandidate(candidate, learnAiSelection = true)
     }
 
@@ -207,26 +212,27 @@ class InputViewModel(
     }
 
     fun onEmojiClick(emoji: String) {
+        preferenceManager.recordKeyPress()
         preferenceManager.recordEmojiUse(emoji)
         _recentEmojiCounts.value = preferenceManager.getEmojiRecentCounts()
-        service.currentInputConnection?.commitText(emoji, 1)
+        service.currentInputConnection?.let { commitTextAndTrack(it, emoji, 1) }
     }
 
     private fun commitCandidate(candidate: Candidate, learnAiSelection: Boolean) {
         if (candidate.isPlaceholder) return
         val sourcePinyin = _pinyinBuffer.value
-        val contextText = getTypingContext()
+        val contextBefore = getContextBeforeCursor()
         val text = pinyinEngine.commitCandidate(
             candidate = candidate,
             sourcePinyin = sourcePinyin,
-            contextText = contextText,
+            contextText = getLlmTypingContext(contextBefore),
             learnAiSelection = learnAiSelection
         )
-        service.currentInputConnection?.commitText(text, 1)
+        service.currentInputConnection?.let { commitTextAndTrack(it, text, 1) }
         _pinyinBuffer.value = ""
         _pinyinCursor.value = 0
         _candidates.value = emptyList()
-        fetchContextPredictions(contextText + text)
+        fetchContextPredictions(contextBefore + text)
     }
 
     private fun commitPendingComposition(): String {
@@ -234,16 +240,17 @@ class InputViewModel(
         val currentCandidates = _candidates.value
         val candidate = currentCandidates.firstOrNull { !it.isPlaceholder }
         val committed = if (_isChinese.value && candidate != null) {
+            val contextBefore = getContextBeforeCursor()
             val text = pinyinEngine.commitCandidate(
                 candidate = candidate,
                 sourcePinyin = _pinyinBuffer.value,
-                contextText = getTypingContext(),
+                contextText = getLlmTypingContext(contextBefore),
                 learnAiSelection = false
             )
-            ic.commitText(text, 1)
+            commitTextAndTrack(ic, text, 1)
             text
         } else if (_isChinese.value && _pinyinBuffer.value.isNotEmpty()) {
-            ic.commitText(_pinyinBuffer.value, 1)
+            commitTextAndTrack(ic, _pinyinBuffer.value, 1)
             _pinyinBuffer.value
         } else {
             ""
@@ -256,7 +263,7 @@ class InputViewModel(
 
     private fun updatePinyinCandidates() {
         val pinyin = _pinyinBuffer.value
-        val contextText = getTypingContext()
+        val contextText = getLlmTypingContext()
         pinyinEngine.processInput(pinyin, contextText, object : PinyinEngine.CandidateListener {
             override fun onCandidatesUpdated(candidates: List<Candidate>) {
                 if (_pinyinBuffer.value == pinyin) {
@@ -268,7 +275,7 @@ class InputViewModel(
 
     private fun fetchContextPredictions(contextOverride: String? = null) {
         if (_pinyinBuffer.value.isNotEmpty()) return
-        val contextText = (contextOverride ?: getTypingContext()).takeLast(CONTEXT_CHAR_COUNT)
+        val contextText = getLlmTypingContext(contextOverride)
         pinyinEngine.fetchContextPredictions(contextText, object : PinyinEngine.CandidateListener {
             override fun onCandidatesUpdated(candidates: List<Candidate>) {
                 if (_pinyinBuffer.value.isEmpty()) {
@@ -278,9 +285,39 @@ class InputViewModel(
         })
     }
 
-    private fun getTypingContext(): String {
+    private fun getContextBeforeCursor(): String {
         val ic = service.currentInputConnection ?: return ""
-        return ic.getTextBeforeCursor(CONTEXT_CHAR_COUNT, 0)?.toString() ?: ""
+        val limit = preferenceManager.getAdvancedImeSettings().contextBeforeChars
+        if (limit <= 0) return ""
+        return ic.getTextBeforeCursor(limit, 0)?.toString() ?: ""
+    }
+
+    private fun getContextAfterCursor(): String {
+        val ic = service.currentInputConnection ?: return ""
+        val limit = preferenceManager.getAdvancedImeSettings().contextAfterChars
+        if (limit <= 0) return ""
+        return ic.getTextAfterCursor(limit, 0)?.toString() ?: ""
+    }
+
+    private fun getLlmTypingContext(contextBeforeOverride: String? = null): String {
+        val settings = preferenceManager.getAdvancedImeSettings()
+        val before = (contextBeforeOverride ?: getContextBeforeCursor()).takeLast(settings.contextBeforeChars)
+        val after = getContextAfterCursor().take(settings.contextAfterChars)
+        if (before.isBlank() && after.isBlank()) return ""
+        return buildString {
+            append("Before cursor: ")
+            append(before)
+            if (after.isNotBlank()) {
+                append('\n')
+                append("After cursor: ")
+                append(after)
+            }
+        }
+    }
+
+    private fun commitTextAndTrack(ic: android.view.inputmethod.InputConnection, text: String, newCursorPosition: Int) {
+        ic.commitText(text, newCursorPosition)
+        preferenceManager.recordCommittedText(text)
     }
 
     private fun insertPinyinLetter(letter: String) {
@@ -294,7 +331,7 @@ class InputViewModel(
         viewModelScope.launch {
             val text = asrClient.transcribeApi(provider, modelName, language, file)
             if (text != null) {
-                service.currentInputConnection?.commitText(text, 1)
+                service.currentInputConnection?.let { commitTextAndTrack(it, text, 1) }
                 _recordingState.value = RecordingState.IDLE
             } else {
                 showRecordingError("ASR API transcription failed")
@@ -326,7 +363,6 @@ class InputViewModel(
     }
 
     companion object {
-        private const val CONTEXT_CHAR_COUNT = 50
         private const val RECORDING_ERROR_VISIBLE_MS = 1800L
 
         private fun isPinyinLetter(key: String): Boolean {

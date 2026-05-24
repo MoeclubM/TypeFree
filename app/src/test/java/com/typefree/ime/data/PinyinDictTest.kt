@@ -23,6 +23,16 @@ class PinyinDictTest {
     }
 
     @Test
+    fun ranksLocalCandidatesByRecordedWordFrequency() {
+        val frequentDict = PinyinDict(
+            entries = mapOf("ni" to listOf("你", "呢")),
+            wordFrequencies = mapOf("ni\u0000呢" to 3)
+        )
+
+        assertEquals("呢", frequentDict.getCandidates("ni").first())
+    }
+
+    @Test
     fun composesSegmentedPinyinCandidates() {
         val candidates = dict.getCandidates("nihao")
 
@@ -103,5 +113,18 @@ class PinyinDictTest {
         )
 
         assertTrue(userDict.getCandidates("zszz").contains("众所周知"))
+    }
+
+    @Test
+    fun generatesMissingSingleCharacterEntriesFromAlignedPinyin() {
+        val userDict = PinyinDict(
+            mapOf(
+                "ce" to listOf("测")
+            )
+        )
+
+        val missing = userDict.missingSingleCharacterEntries("ceshi", "测试")
+
+        assertEquals(listOf(UserPinyinEntry("shi", "试")), missing)
     }
 }

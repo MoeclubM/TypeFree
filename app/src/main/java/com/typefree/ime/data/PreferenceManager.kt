@@ -61,6 +61,28 @@ data class LlmTokenUsage(
 )
 
 @Serializable
+data class AdvancedImeSettings(
+    val aiCandidateDebounceMs: Int = 300,
+    val contextBeforeChars: Int = 50,
+    val contextAfterChars: Int = 30,
+    val aiCandidateLimit: Int = 8,
+    val learnedEntryLimit: Int = 12,
+    val localCandidateLimit: Int = 40,
+    val partCandidateLimit: Int = 4,
+    val prefixKeyLimit: Int = 24,
+    val prefixWordLimit: Int = 20,
+    val maxComposedSegments: Int = 6,
+    val maxComposedCandidates: Int = 32,
+    val acronymCandidateLimit: Int = 20,
+    val maxAiRequestLogs: Int = 500,
+    val maxRecentEmoji: Int = 120,
+    val maxWordFrequencies: Int = 2000,
+    val llmConnectTimeoutSeconds: Int = 5,
+    val llmReadTimeoutSeconds: Int = 10,
+    val llmWriteTimeoutSeconds: Int = 5
+)
+
+@Serializable
 data class AiRequestLog(
     val timestampMs: Long,
     val feature: String,
@@ -120,6 +142,7 @@ class PreferenceManager(context: Context) {
         private const val KEY_EMOJI_RECENT_COUNTS = "emoji_recent_counts_v1"
         private const val KEY_LOCAL_USAGE_STATS = "local_usage_stats_v1"
         private const val KEY_WORD_FREQUENCIES = "word_frequencies_v1"
+        private const val KEY_ADVANCED_IME_SETTINGS = "advanced_ime_settings_v1"
 
         val DEFAULT_PROVIDERS = listOf(
             ProviderConfig(
@@ -377,15 +400,47 @@ class PreferenceManager(context: Context) {
         plainPrefs.edit().putBoolean(KEY_PINYIN_LLM_ENABLED, enabled).apply()
     }
 
+    fun getAdvancedImeSettings(): AdvancedImeSettings {
+        val stored = plainPrefs.getString(KEY_ADVANCED_IME_SETTINGS, null)
+        val decoded = if (stored == null) {
+            AdvancedImeSettings(
+                aiCandidateDebounceMs = plainPrefs.getInt(
+                    KEY_AI_CANDIDATE_DEBOUNCE_MS,
+                    AdvancedImeSettings().aiCandidateDebounceMs
+                )
+            )
+        } else {
+            try {
+                json.decodeFromString<AdvancedImeSettings>(stored)
+            } catch (e: Exception) {
+                Log.e(TAG, "Failed to decode advanced IME settings", e)
+                AdvancedImeSettings()
+            }
+        }
+        return sanitizeAdvancedImeSettings(decoded)
+    }
+
+    fun saveAdvancedImeSettings(settings: AdvancedImeSettings) {
+        val sanitized = sanitizeAdvancedImeSettings(settings)
+        plainPrefs.edit()
+            .putString(KEY_ADVANCED_IME_SETTINGS, json.encodeToString(sanitized))
+            .putInt(KEY_AI_CANDIDATE_DEBOUNCE_MS, sanitized.aiCandidateDebounceMs)
+            .apply()
+    }
+
+    fun resetAdvancedImeSettings() {
+        plainPrefs.edit()
+            .remove(KEY_ADVANCED_IME_SETTINGS)
+            .remove(KEY_AI_CANDIDATE_DEBOUNCE_MS)
+            .apply()
+    }
+
     fun getAiCandidateDebounceMs(): Int {
-        return plainPrefs.getInt(KEY_AI_CANDIDATE_DEBOUNCE_MS, DEFAULT_AI_CANDIDATE_DEBOUNCE_MS)
-            .coerceIn(0, MAX_AI_CANDIDATE_DEBOUNCE_MS)
+        return getAdvancedImeSettings().aiCandidateDebounceMs
     }
 
     fun setAiCandidateDebounceMs(value: Int) {
-        plainPrefs.edit()
-            .putInt(KEY_AI_CANDIDATE_DEBOUNCE_MS, value.coerceIn(0, MAX_AI_CANDIDATE_DEBOUNCE_MS))
-            .apply()
+        saveAdvancedImeSettings(getAdvancedImeSettings().copy(aiCandidateDebounceMs = value))
     }
 
     fun isVoiceInputEnabled(): Boolean {
@@ -407,7 +462,7 @@ class PreferenceManager(context: Context) {
     }
 
     fun appendAiRequestLog(log: AiRequestLog) {
-        val logs = (listOf(log) + getAiRequestLogs()).take(MAX_AI_REQUEST_LOGS)
+        val logs = (listOf(log) + getAiRequestLogs()).take(getAdvancedImeSettings().maxAiRequestLogs)
         plainPrefs.edit().putString(KEY_AI_REQUEST_LOGS, json.encodeToString(logs)).apply()
     }
 
@@ -487,7 +542,7 @@ class PreferenceManager(context: Context) {
         }
         val trimmed = frequencies.entries
             .sortedByDescending { it.value }
-            .take(MAX_WORD_FREQUENCIES)
+            .take(getAdvancedImeSettings().maxWordFrequencies)
             .associate { it.key to it.value }
         plainPrefs.edit().putString(KEY_WORD_FREQUENCIES, json.encodeToString(trimmed)).apply()
     }
@@ -508,7 +563,7 @@ class PreferenceManager(context: Context) {
         counts[emoji] = (counts[emoji] ?: 0) + 1
         plainPrefs.edit()
             .putString(KEY_EMOJI_RECENT_COUNTS, json.encodeToString(counts.entries.sortedByDescending { it.value }
-                .take(MAX_RECENT_EMOJI)
+                .take(getAdvancedImeSettings().maxRecentEmoji)
                 .associate { it.key to it.value }))
             .apply()
     }
@@ -605,6 +660,29 @@ class PreferenceManager(context: Context) {
         return "\u0000$word"
     }
 
+    private fun sanitizeAdvancedImeSettings(settings: AdvancedImeSettings): AdvancedImeSettings {
+        return settings.copy(
+            aiCandidateDebounceMs = settings.aiCandidateDebounceMs.coerceIn(0, 5000),
+            contextBeforeChars = settings.contextBeforeChars.coerceIn(0, 300),
+            contextAfterChars = settings.contextAfterChars.coerceIn(0, 200),
+            aiCandidateLimit = settings.aiCandidateLimit.coerceIn(1, 20),
+            learnedEntryLimit = settings.learnedEntryLimit.coerceIn(1, 50),
+            localCandidateLimit = settings.localCandidateLimit.coerceIn(1, 120),
+            partCandidateLimit = settings.partCandidateLimit.coerceIn(1, 20),
+            prefixKeyLimit = settings.prefixKeyLimit.coerceIn(1, 120),
+            prefixWordLimit = settings.prefixWordLimit.coerceIn(1, 120),
+            maxComposedSegments = settings.maxComposedSegments.coerceIn(1, 20),
+            maxComposedCandidates = settings.maxComposedCandidates.coerceIn(1, 240),
+            acronymCandidateLimit = settings.acronymCandidateLimit.coerceIn(1, 120),
+            maxAiRequestLogs = settings.maxAiRequestLogs.coerceIn(0, 5000),
+            maxRecentEmoji = settings.maxRecentEmoji.coerceIn(0, 500),
+            maxWordFrequencies = settings.maxWordFrequencies.coerceIn(0, 10000),
+            llmConnectTimeoutSeconds = settings.llmConnectTimeoutSeconds.coerceIn(1, 60),
+            llmReadTimeoutSeconds = settings.llmReadTimeoutSeconds.coerceIn(1, 120),
+            llmWriteTimeoutSeconds = settings.llmWriteTimeoutSeconds.coerceIn(1, 60)
+        )
+    }
+
     private fun parseUserPinyinCsv(text: String): List<UserPinyinEntry> {
         return text.lineSequence()
             .map { it.trim() }
@@ -668,9 +746,4 @@ class PreferenceManager(context: Context) {
         "deepseek-coder"
     )
 
-    private val MAX_AI_REQUEST_LOGS = 500
-    private val MAX_RECENT_EMOJI = 120
-    private val MAX_WORD_FREQUENCIES = 2000
-    private val DEFAULT_AI_CANDIDATE_DEBOUNCE_MS = 300
-    private val MAX_AI_CANDIDATE_DEBOUNCE_MS = 5000
 }

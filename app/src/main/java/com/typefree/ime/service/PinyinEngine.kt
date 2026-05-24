@@ -46,6 +46,7 @@ class PinyinEngine(context: Context, private val preferenceManager: PreferenceMa
             listener.onCandidatesUpdated(emptyList())
             return
         }
+        pinyinDict.updateAdvancedSettings(preferenceManager.getAdvancedImeSettings())
 
         localJob = scope.launch {
             val localCandidates = withContext(Dispatchers.Default) {
@@ -165,6 +166,7 @@ class PinyinEngine(context: Context, private val preferenceManager: PreferenceMa
     }
 
     private fun learnSelectedAiCandidate(sourcePinyin: String, selectedText: String, contextText: String) {
+        pinyinDict.updateAdvancedSettings(preferenceManager.getAdvancedImeSettings())
         val providerId = preferenceManager.getPinyinProviderId()
         val provider = preferenceManager.getProvider(providerId)
         val modelName = preferenceManager.getPinyinModelName()

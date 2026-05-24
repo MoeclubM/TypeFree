@@ -32,6 +32,50 @@ class LLMClientTest {
     }
 
     @Test
+    fun parsesOpenAiChatTokenUsage() {
+        val usage = client.parseOpenAiChatTokenUsage(
+            """{"usage":{"prompt_tokens":10,"completion_tokens":4,"total_tokens":14}}"""
+        )
+
+        assertEquals(10, usage?.promptTokens)
+        assertEquals(4, usage?.completionTokens)
+        assertEquals(14, usage?.totalTokens)
+    }
+
+    @Test
+    fun parsesOpenAiResponsesTokenUsage() {
+        val usage = client.parseOpenAiResponsesTokenUsage(
+            """{"usage":{"input_tokens":9,"output_tokens":5,"total_tokens":14}}"""
+        )
+
+        assertEquals(9, usage?.promptTokens)
+        assertEquals(5, usage?.completionTokens)
+        assertEquals(14, usage?.totalTokens)
+    }
+
+    @Test
+    fun parsesAnthropicTokenUsage() {
+        val usage = client.parseAnthropicTokenUsage(
+            """{"usage":{"input_tokens":7,"output_tokens":3}}"""
+        )
+
+        assertEquals(7, usage?.promptTokens)
+        assertEquals(3, usage?.completionTokens)
+        assertEquals(10, usage?.totalTokens)
+    }
+
+    @Test
+    fun parsesGeminiTokenUsage() {
+        val usage = client.parseGeminiTokenUsage(
+            """{"usageMetadata":{"promptTokenCount":6,"candidatesTokenCount":2,"totalTokenCount":8}}"""
+        )
+
+        assertEquals(6, usage?.promptTokens)
+        assertEquals(2, usage?.completionTokens)
+        assertEquals(8, usage?.totalTokens)
+    }
+
+    @Test
     fun parsesMarkdownWrappedCandidateObject() {
         val candidates = client.parseJsonList(
             """

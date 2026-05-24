@@ -5,6 +5,7 @@ import android.content.Context
 class PinyinDict {
     private val dict = HashMap<String, MutableList<String>>()
     private var wordFrequencies: Map<String, Int> = emptyMap()
+    private var advancedSettings: AdvancedImeSettings = AdvancedImeSettings()
     private var sortedKeys: List<String> = emptyList()
     private var maxKeyLength: Int = 1
     private var initialIndex: Map<String, List<String>> = emptyMap()
@@ -18,11 +19,17 @@ class PinyinDict {
 
     constructor(context: Context, preferenceManager: PreferenceManager) {
         wordFrequencies = preferenceManager.getWordFrequencies()
+        advancedSettings = preferenceManager.getAdvancedImeSettings()
         loadUserDict(preferenceManager.getUserPinyinEntries())
     }
 
-    internal constructor(entries: Map<String, List<String>>, wordFrequencies: Map<String, Int> = emptyMap()) {
+    internal constructor(
+        entries: Map<String, List<String>>,
+        wordFrequencies: Map<String, Int> = emptyMap(),
+        advancedSettings: AdvancedImeSettings = AdvancedImeSettings()
+    ) {
         this.wordFrequencies = wordFrequencies.filterValues { it > 0 }
+        this.advancedSettings = advancedSettings
         entries.forEach { (pinyin, words) ->
             val normalized = pinyin.trim().lowercase()
             if (normalized.isNotEmpty()) {
@@ -64,6 +71,13 @@ class PinyinDict {
         }
         wordFrequencies = updated
         candidateCache.clear()
+    }
+
+    fun updateAdvancedSettings(settings: AdvancedImeSettings) {
+        if (advancedSettings == settings) return
+        advancedSettings = settings
+        candidateCache.clear()
+        segmentCache.clear()
     }
 
     fun containsEntry(pinyin: String, word: String): Boolean {
@@ -140,21 +154,21 @@ class PinyinDict {
                 rankWordsForPinyin(segment, dict[segment] ?: emptyList())
             }
             if (partCandidates.all { it.isNotEmpty() }) {
-                if (splits.size > MAX_COMPOSED_SEGMENTS) {
+                if (splits.size > advancedSettings.maxComposedSegments) {
                     val sentence = partCandidates.joinToString("") { it.first() }
                     candidates.add(sentence)
                 } else {
-                    var resultList = partCandidates[0].take(PART_CANDIDATE_LIMIT)
+                    var resultList = partCandidates[0].take(advancedSettings.partCandidateLimit)
 
                     for (i in 1 until partCandidates.size) {
-                        val list2 = partCandidates[i].take(PART_CANDIDATE_LIMIT)
+                        val list2 = partCandidates[i].take(advancedSettings.partCandidateLimit)
                         val nextList = mutableListOf<String>()
                         for (c1 in resultList) {
                             for (c2 in list2) {
                                 nextList.add(c1 + c2)
-                                if (nextList.size >= MAX_COMPOSED_CANDIDATES) break
+                                if (nextList.size >= advancedSettings.maxComposedCandidates) break
                             }
-                            if (nextList.size >= MAX_COMPOSED_CANDIDATES) break
+                            if (nextList.size >= advancedSettings.maxComposedCandidates) break
                         }
                         resultList = nextList
                         if (resultList.isEmpty()) break
@@ -175,7 +189,7 @@ class PinyinDict {
             candidates.addAll(matches)
         }
 
-        return rankWordsForPinyin(clean, candidates.distinct()).take(MAX_CANDIDATES)
+        return rankWordsForPinyin(clean, candidates.distinct()).take(advancedSettings.localCandidateLimit)
     }
 
     private fun prefixCompletionCandidates(input: String): List<String> {
@@ -206,16 +220,16 @@ class PinyinDict {
                     pinyin.length > prefix.length &&
                     dict[pinyin].orEmpty().isNotEmpty()
             }
-            .take(PREFIX_KEY_LIMIT)
-            .flatMap { dict[it].orEmpty().asSequence().take(PART_CANDIDATE_LIMIT) }
+            .take(advancedSettings.prefixKeyLimit)
+            .flatMap { dict[it].orEmpty().asSequence().take(advancedSettings.partCandidateLimit) }
             .toList()
             .let { rankWordsForPinyin(prefix, it) }
 
         if (prefixWords.isEmpty()) return emptyList()
-        if (exactSegments.isEmpty()) return prefixWords.take(PREFIX_WORD_LIMIT)
+        if (exactSegments.isEmpty()) return prefixWords.take(advancedSettings.prefixWordLimit)
 
         val exactCandidates = exactSegments.map {
-            rankWordsForPinyin(it, dict[it].orEmpty()).take(PART_CANDIDATE_LIMIT)
+            rankWordsForPinyin(it, dict[it].orEmpty()).take(advancedSettings.partCandidateLimit)
         }
         if (exactCandidates.any { it.isEmpty() }) return emptyList()
 
@@ -225,9 +239,9 @@ class PinyinDict {
             for (left in composed) {
                 for (right in exactCandidates[i]) {
                     next.add(left + right)
-                    if (next.size >= MAX_COMPOSED_CANDIDATES) break
+                    if (next.size >= advancedSettings.maxComposedCandidates) break
                 }
-                if (next.size >= MAX_COMPOSED_CANDIDATES) break
+                if (next.size >= advancedSettings.maxComposedCandidates) break
             }
             composed = next
         }
@@ -236,7 +250,7 @@ class PinyinDict {
         for (left in composed) {
             for (right in prefixWords) {
                 result.add(left + right)
-                if (result.size >= MAX_COMPOSED_CANDIDATES) return result
+                if (result.size >= advancedSettings.maxComposedCandidates) return result
             }
         }
         return result
@@ -285,7 +299,7 @@ class PinyinDict {
     }
 
     private fun acronymCandidates(input: String): List<String> {
-        return rankWordsForPinyin(input, initialIndex[input].orEmpty()).take(ACRONYM_WORD_LIMIT)
+        return rankWordsForPinyin(input, initialIndex[input].orEmpty()).take(advancedSettings.acronymCandidateLimit)
     }
 
     private fun pinyinInitialKeys(pinyin: String): Set<String> {
@@ -395,13 +409,6 @@ class PinyinDict {
     companion object {
         private const val SEGMENT_CACHE_SIZE = 512
         private const val CANDIDATE_CACHE_SIZE = 1024
-        private const val PART_CANDIDATE_LIMIT = 4
-        private const val PREFIX_KEY_LIMIT = 24
-        private const val PREFIX_WORD_LIMIT = 20
-        private const val MAX_COMPOSED_SEGMENTS = 6
-        private const val MAX_COMPOSED_CANDIDATES = 32
-        private const val MAX_CANDIDATES = 40
-        private const val ACRONYM_WORD_LIMIT = 20
         private const val MAX_PINYIN_SYLLABLE_LENGTH = 6
         private val PINYIN_SYLLABLES = setOf(
             "a", "ai", "an", "ang", "ao",

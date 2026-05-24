@@ -1,6 +1,7 @@
 package com.typefree.ime.service
 
 import android.util.Log
+import com.typefree.ime.data.AdvancedImeSettings
 import com.typefree.ime.data.AiRequestLog
 import com.typefree.ime.data.LlmTokenUsage
 import com.typefree.ime.data.PreferenceManager
@@ -48,14 +49,21 @@ data class ModelTestResult(
 )
 
 class LLMClient(private val preferenceManager: PreferenceManager? = null) {
-    private val client = OkHttpClient.Builder()
-        .connectTimeout(5, TimeUnit.SECONDS)
-        .readTimeout(10, TimeUnit.SECONDS)
-        .writeTimeout(5, TimeUnit.SECONDS)
-        .build()
-
     private val json = Json { ignoreUnknownKeys = true }
     private val jsonMediaType = "application/json; charset=utf-8".toMediaType()
+
+    private fun advancedSettings(): AdvancedImeSettings {
+        return preferenceManager?.getAdvancedImeSettings() ?: AdvancedImeSettings()
+    }
+
+    private fun httpClient(): OkHttpClient {
+        val settings = advancedSettings()
+        return OkHttpClient.Builder()
+            .connectTimeout(settings.llmConnectTimeoutSeconds.toLong(), TimeUnit.SECONDS)
+            .readTimeout(settings.llmReadTimeoutSeconds.toLong(), TimeUnit.SECONDS)
+            .writeTimeout(settings.llmWriteTimeoutSeconds.toLong(), TimeUnit.SECONDS)
+            .build()
+    }
 
     private fun requiresApiKey(provider: ProviderConfig): Boolean {
         return provider.apiKey.isEmpty() && !provider.baseUrl.isLocalEndpoint()
@@ -88,7 +96,7 @@ class LLMClient(private val preferenceManager: PreferenceManager? = null) {
         val systemPrompt = """
             You are the AI candidate generator for a Simplified Chinese pinyin IME.
             Convert the current pinyin pronunciation into short Chinese word or phrase candidates.
-            Use the context only to rank candidates; do not predict unrelated next text.
+            Use the text before and after the cursor to rank candidates and make the insertion fit the surrounding sentence.
             The pinyin may contain a small typing error: one wrong, missing, extra, or swapped Latin letter.
             If the pinyin is invalid or has no obvious exact reading, infer the most likely intended pinyin and still return useful Chinese candidates.
             Put the most likely corrected candidate first, then alternatives.
@@ -97,24 +105,26 @@ class LLMClient(private val preferenceManager: PreferenceManager? = null) {
             Return only a JSON object with a candidates string array and a first_candidate_next_word string. No extra text.
         """.trimIndent()
         val userPrompt = """
-            Text before cursor: "$context"
+            Cursor context:
+            $context
             Current pinyin: "$pinyin"
         """.trimIndent()
 
         var errorMessage: String? = null
-        val rawResponse = try {
+        val llmResult = try {
             when (provider.type) {
-                "anthropic" -> callAnthropic(provider, modelName, systemPrompt, userPrompt, includeNextWord = true)
-                "openai_responses" -> callOpenAiResponses(provider, modelName, systemPrompt, userPrompt, includeNextWord = true)
-                "gemini" -> callGemini(provider, modelName, systemPrompt, userPrompt, includeNextWord = true)
-                else -> callOpenAiChat(provider, modelName, systemPrompt, userPrompt, includeNextWord = true)
+                "anthropic" -> requestAnthropic(provider, modelName, systemPrompt, userPrompt, includeNextWord = true)
+                "openai_responses" -> requestOpenAiResponses(provider, modelName, systemPrompt, userPrompt, includeNextWord = true)
+                "gemini" -> requestGemini(provider, modelName, systemPrompt, userPrompt, includeNextWord = true)
+                else -> requestOpenAiChat(provider, modelName, systemPrompt, userPrompt, includeNextWord = true)
             }
         } catch (e: Exception) {
             logError("Error calling LLM for pinyin", e)
             errorMessage = e.message
-            null
+            LlmTextResult(false, null)
         }
 
+        val rawResponse = llmResult.text
         val result = parsePinyinResult(rawResponse)
         logAiRequest(
             provider,
@@ -124,7 +134,8 @@ class LLMClient(private val preferenceManager: PreferenceManager? = null) {
             userPrompt,
             rawResponse,
             result.candidates + listOfNotNull(result.firstCandidateNextWord.takeIf { it.isNotBlank() }?.let { "next:$it" }),
-            errorMessage
+            errorMessage,
+            llmResult.tokenUsage
         )
         return result
     }
@@ -139,30 +150,32 @@ class LLMClient(private val preferenceManager: PreferenceManager? = null) {
 
         val systemPrompt = """
             You are the AI context suggestion generator for a Simplified Chinese IME.
-            Given the text before the cursor, predict short likely continuations.
-            Return only text that should be inserted after the existing context.
-            Do not repeat the existing context. Return only a JSON object with a candidates string array and no extra text.
+            Given the text around the cursor, predict short likely text to insert at the cursor.
+            The suggestion must fit between the before-cursor text and any after-cursor text.
+            Do not repeat existing context. Return only a JSON object with a candidates string array and no extra text.
         """.trimIndent()
         val userPrompt = """
-            Text before cursor: "$context"
+            Cursor context:
+            $context
         """.trimIndent()
 
         var errorMessage: String? = null
-        val rawResponse = try {
+        val llmResult = try {
             when (provider.type) {
-                "anthropic" -> callAnthropic(provider, modelName, systemPrompt, userPrompt)
-                "openai_responses" -> callOpenAiResponses(provider, modelName, systemPrompt, userPrompt)
-                "gemini" -> callGemini(provider, modelName, systemPrompt, userPrompt)
-                else -> callOpenAiChat(provider, modelName, systemPrompt, userPrompt)
+                "anthropic" -> requestAnthropic(provider, modelName, systemPrompt, userPrompt)
+                "openai_responses" -> requestOpenAiResponses(provider, modelName, systemPrompt, userPrompt)
+                "gemini" -> requestGemini(provider, modelName, systemPrompt, userPrompt)
+                else -> requestOpenAiChat(provider, modelName, systemPrompt, userPrompt)
             }
         } catch (e: Exception) {
             logError("Error calling LLM for prediction", e)
             errorMessage = e.message
-            null
+            LlmTextResult(false, null)
         }
 
-        val parsed = parseJsonList(rawResponse)
-        logAiRequest(provider, modelName, "context_prediction", systemPrompt, userPrompt, rawResponse, parsed, errorMessage)
+        val rawResponse = llmResult.text
+        val parsed = parseJsonList(rawResponse).distinct().take(advancedSettings().aiCandidateLimit)
+        logAiRequest(provider, modelName, "context_prediction", systemPrompt, userPrompt, rawResponse, parsed, errorMessage, llmResult.tokenUsage)
         return parsed
     }
 
@@ -174,7 +187,8 @@ class LLMClient(private val preferenceManager: PreferenceManager? = null) {
         modelName: String,
         sourcePinyin: String,
         selectedText: String,
-        context: String
+        context: String,
+        existingEntries: List<UserPinyinEntry> = emptyList()
     ): List<UserPinyinEntry> {
         if (
             modelName.isBlank() ||
@@ -190,32 +204,41 @@ class LLMClient(private val preferenceManager: PreferenceManager? = null) {
             You are the user dictionary learner for a Simplified Chinese pinyin IME.
             The user has selected one AI candidate. Segment only that selected text into useful dictionary entries.
             For every entry, output the exact Chinese word from the selected text and its lowercase toneless pinyin.
-            Prefer independent words or common phrases over single characters. Include single characters only when needed.
+            Prefer independent words or common phrases, and also include every missing single Chinese character from the selected text.
             Do not include punctuation, Latin text, explanations, or words that are not in the selected text.
-            Use the source pinyin as a pronunciation hint, but split it to match the selected Chinese words.
+            Use the source pinyin only as a pronunciation hint; if it has typos, derive pinyin from the Chinese text.
+            Do not return entries already present in the local dictionary.
             Return only a JSON object with a candidates string array. Each item must be exactly "pinyin<TAB>word".
             Example: {"candidates":["nihao\t你好","shijie\t世界"]}
         """.trimIndent()
+        val existingDictionaryText = existingEntries
+            .distinctBy { "${it.pinyin}\u0000${it.word}" }
+            .joinToString("\n") { "${it.pinyin}\t${it.word}" }
+            .ifBlank { "(none)" }
         val userPrompt = """
-            Text before cursor: "$context"
+            Cursor context:
+            $context
             Source pinyin typed by user: "$sourcePinyin"
             Selected AI candidate: "$selectedText"
+            Existing local entries for this text:
+            $existingDictionaryText
         """.trimIndent()
 
         var errorMessage: String? = null
-        val rawResponse = try {
+        val llmResult = try {
             when (provider.type) {
-                "anthropic" -> callAnthropic(provider, modelName, systemPrompt, userPrompt)
-                "openai_responses" -> callOpenAiResponses(provider, modelName, systemPrompt, userPrompt)
-                "gemini" -> callGemini(provider, modelName, systemPrompt, userPrompt)
-                else -> callOpenAiChat(provider, modelName, systemPrompt, userPrompt)
+                "anthropic" -> requestAnthropic(provider, modelName, systemPrompt, userPrompt)
+                "openai_responses" -> requestOpenAiResponses(provider, modelName, systemPrompt, userPrompt)
+                "gemini" -> requestGemini(provider, modelName, systemPrompt, userPrompt)
+                else -> requestOpenAiChat(provider, modelName, systemPrompt, userPrompt)
             }
         } catch (e: Exception) {
             logError("Error calling LLM for dictionary segmentation", e)
             errorMessage = e.message
-            null
+            LlmTextResult(false, null)
         }
 
+        val rawResponse = llmResult.text
         val parsed = parsePinyinEntryList(rawResponse)
         logAiRequest(
             provider = provider,
@@ -225,7 +248,8 @@ class LLMClient(private val preferenceManager: PreferenceManager? = null) {
             userPrompt = userPrompt,
             rawResponse = rawResponse,
             parsedOutput = parsed.map { "${it.pinyin}\t${it.word}" },
-            error = errorMessage
+            error = errorMessage,
+            tokenUsage = llmResult.tokenUsage
         )
         return parsed
     }
@@ -270,7 +294,8 @@ class LLMClient(private val preferenceManager: PreferenceManager? = null) {
             userPrompt = userPrompt,
             rawResponse = result.text,
             parsedOutput = parsed,
-            error = errorMessage
+            error = errorMessage,
+            tokenUsage = result.tokenUsage
         )
 
         return if (result.text != null && parsed.isNotEmpty()) {
@@ -391,7 +416,8 @@ class LLMClient(private val preferenceManager: PreferenceManager? = null) {
     private data class LlmTextResult(
         val success: Boolean,
         val text: String?,
-        val streamingUsed: Boolean = false
+        val streamingUsed: Boolean = false,
+        val tokenUsage: LlmTokenUsage? = null
     )
 
     internal fun buildOpenAiChatRequestBody(
@@ -414,6 +440,9 @@ class LLMClient(private val preferenceManager: PreferenceManager? = null) {
             put("response_format", responseFormat)
             if (stream) {
                 put("stream", true)
+                putJsonObject("stream_options") {
+                    put("include_usage", true)
+                }
             }
             putOpenAiChatThinking(modelName, providerType, thinkingBudget, thinkingLevel)
         }.toString()
@@ -450,7 +479,7 @@ class LLMClient(private val preferenceManager: PreferenceManager? = null) {
         }
 
         val request = requestBuilder.build()
-        return client.newCall(request).execute().use { response ->
+        return httpClient().newCall(request).execute().use { response ->
             if (!response.isSuccessful) {
                 logError("OpenAI call failed: ${response.code} ${response.message}")
                 return LlmTextResult(false, null)
@@ -463,7 +492,11 @@ class LLMClient(private val preferenceManager: PreferenceManager? = null) {
                 val choices = element.jsonObject["choices"]?.jsonArray
                 val firstChoice = choices?.getOrNull(0)?.jsonObject
                 val message = firstChoice?.get("message")?.jsonObject
-                LlmTextResult(true, message?.get("content")?.jsonPrimitive?.contentOrNull)
+                LlmTextResult(
+                    success = true,
+                    text = message?.get("content")?.jsonPrimitive?.contentOrNull,
+                    tokenUsage = openAiChatTokenUsage(element.jsonObject)
+                )
             } catch (e: Exception) {
                 logError("Failed to parse OpenAI response body", e)
                 LlmTextResult(true, null)
@@ -473,13 +506,14 @@ class LLMClient(private val preferenceManager: PreferenceManager? = null) {
 
     private fun executeOpenAiChatStreaming(provider: ProviderConfig, url: String, requestBodyJson: String): LlmTextResult {
         val request = authorizedPostRequest(provider, url, requestBodyJson)
-        return client.newCall(request).execute().use { response ->
+        return httpClient().newCall(request).execute().use { response ->
             if (!response.isSuccessful) {
                 logError("OpenAI streaming call failed: ${response.code} ${response.message}")
                 return LlmTextResult(false, null, streamingUsed = true)
             }
             val source = response.body?.source() ?: return LlmTextResult(true, null, streamingUsed = true)
             val output = StringBuilder()
+            var tokenUsage: LlmTokenUsage? = null
             while (true) {
                 val line = source.readUtf8Line() ?: break
                 if (!line.startsWith("data:")) continue
@@ -488,6 +522,7 @@ class LLMClient(private val preferenceManager: PreferenceManager? = null) {
                 if (data == "[DONE]") break
                 val delta = runCatching {
                     val element = json.parseToJsonElement(data)
+                    tokenUsage = openAiChatTokenUsage(element.jsonObject) ?: tokenUsage
                     val choice = element.jsonObject["choices"]?.jsonArray?.firstOrNull()?.jsonObject
                     choice
                         ?.get("delta")
@@ -500,7 +535,7 @@ class LLMClient(private val preferenceManager: PreferenceManager? = null) {
                     output.append(delta)
                 }
             }
-            LlmTextResult(true, output.toString().takeIf { it.isNotBlank() }, streamingUsed = true)
+            LlmTextResult(true, output.toString().takeIf { it.isNotBlank() }, streamingUsed = true, tokenUsage = tokenUsage)
         }
     }
 
@@ -548,7 +583,7 @@ class LLMClient(private val preferenceManager: PreferenceManager? = null) {
         )
 
         val request = authorizedPostRequest(provider, url, requestBodyJson)
-        client.newCall(request).execute().use { response ->
+        httpClient().newCall(request).execute().use { response ->
             if (!response.isSuccessful) {
                 logError("OpenAI Responses call failed: ${response.code} ${response.message}")
                 return@withContext LlmTextResult(false, null)
@@ -556,7 +591,11 @@ class LLMClient(private val preferenceManager: PreferenceManager? = null) {
             val responseBody = response.body?.string() ?: return@withContext LlmTextResult(true, null)
             try {
                 val element = json.parseToJsonElement(responseBody)
-                LlmTextResult(true, extractOpenAiResponseText(element.jsonObject))
+                LlmTextResult(
+                    success = true,
+                    text = extractOpenAiResponseText(element.jsonObject),
+                    tokenUsage = openAiResponsesTokenUsage(element.jsonObject)
+                )
             } catch (e: Exception) {
                 logError("Failed to parse OpenAI Responses body", e)
                 LlmTextResult(true, null)
@@ -594,7 +633,7 @@ class LLMClient(private val preferenceManager: PreferenceManager? = null) {
 
     private fun executeOpenAiResponsesStreaming(provider: ProviderConfig, url: String, requestBodyJson: String): LlmTextResult {
         val request = authorizedPostRequest(provider, url, requestBodyJson)
-        return client.newCall(request).execute().use { response ->
+        return httpClient().newCall(request).execute().use { response ->
             if (!response.isSuccessful) {
                 logError("OpenAI Responses streaming call failed: ${response.code} ${response.message}")
                 return LlmTextResult(false, null, streamingUsed = true)
@@ -602,6 +641,7 @@ class LLMClient(private val preferenceManager: PreferenceManager? = null) {
             val source = response.body?.source() ?: return LlmTextResult(true, null, streamingUsed = true)
             val output = StringBuilder()
             var completedText: String? = null
+            var tokenUsage: LlmTokenUsage? = null
             while (true) {
                 val line = source.readUtf8Line() ?: break
                 if (!line.startsWith("data:")) continue
@@ -621,6 +661,7 @@ class LLMClient(private val preferenceManager: PreferenceManager? = null) {
                             val responseObject = obj["response"]?.jsonObject
                             if (responseObject != null) {
                                 completedText = extractOpenAiResponseText(responseObject)
+                                tokenUsage = openAiResponsesTokenUsage(responseObject) ?: tokenUsage
                             }
                         }
                         "response.failed" -> {
@@ -635,7 +676,7 @@ class LLMClient(private val preferenceManager: PreferenceManager? = null) {
                 }
             }
             val text = output.toString().takeIf { it.isNotBlank() } ?: completedText
-            LlmTextResult(true, text, streamingUsed = true)
+            LlmTextResult(true, text, streamingUsed = true, tokenUsage = tokenUsage)
         }
     }
 
@@ -680,7 +721,7 @@ class LLMClient(private val preferenceManager: PreferenceManager? = null) {
         )
         val request = anthropicPostRequest(provider, url, requestBodyJson)
 
-        client.newCall(request).execute().use { response ->
+        httpClient().newCall(request).execute().use { response ->
             if (!response.isSuccessful) {
                 logError("Anthropic call failed: ${response.code} ${response.message}")
                 return@withContext LlmTextResult(false, null)
@@ -703,7 +744,11 @@ class LLMClient(private val preferenceManager: PreferenceManager? = null) {
                         ?.firstOrNull { it["type"]?.jsonPrimitive?.contentOrNull == "text" }
                     firstText?.get("text")?.jsonPrimitive?.content
                 }
-                LlmTextResult(true, text)
+                LlmTextResult(
+                    success = true,
+                    text = text,
+                    tokenUsage = anthropicTokenUsage(element.jsonObject)
+                )
             } catch (e: Exception) {
                 logError("Failed to parse Anthropic response body", e)
                 LlmTextResult(true, null)
@@ -764,13 +809,14 @@ class LLMClient(private val preferenceManager: PreferenceManager? = null) {
 
     private fun executeAnthropicStreaming(provider: ProviderConfig, url: String, requestBodyJson: String): LlmTextResult {
         val request = anthropicPostRequest(provider, url, requestBodyJson)
-        return client.newCall(request).execute().use { response ->
+        return httpClient().newCall(request).execute().use { response ->
             if (!response.isSuccessful) {
                 logError("Anthropic streaming call failed: ${response.code} ${response.message}")
                 return LlmTextResult(false, null, streamingUsed = true)
             }
             val source = response.body?.source() ?: return LlmTextResult(true, null, streamingUsed = true)
             val output = StringBuilder()
+            var tokenUsage: LlmTokenUsage? = null
             while (true) {
                 val line = source.readUtf8Line() ?: break
                 if (!line.startsWith("data:")) continue
@@ -778,6 +824,7 @@ class LLMClient(private val preferenceManager: PreferenceManager? = null) {
                 if (data.isBlank() || data == "[DONE]") continue
                 runCatching {
                     val obj = json.parseToJsonElement(data).jsonObject
+                    tokenUsage = anthropicTokenUsage(obj, tokenUsage) ?: tokenUsage
                     val delta = obj["delta"]?.jsonObject
                     delta?.get("text")?.jsonPrimitive?.contentOrNull?.let(output::append)
                     delta?.get("partial_json")?.jsonPrimitive?.contentOrNull?.let(output::append)
@@ -787,7 +834,7 @@ class LLMClient(private val preferenceManager: PreferenceManager? = null) {
                     logError("Failed to parse Anthropic stream event", it)
                 }
             }
-            LlmTextResult(true, output.toString().takeIf { it.isNotBlank() }, streamingUsed = true)
+            LlmTextResult(true, output.toString().takeIf { it.isNotBlank() }, streamingUsed = true, tokenUsage = tokenUsage)
         }
     }
 
@@ -824,7 +871,7 @@ class LLMClient(private val preferenceManager: PreferenceManager? = null) {
             return@withContext streamResult
         }
 
-        client.newCall(geminiPostRequest(provider, url, requestBodyJson)).execute().use { response ->
+        httpClient().newCall(geminiPostRequest(provider, url, requestBodyJson)).execute().use { response ->
             if (!response.isSuccessful) {
                 logError("Gemini call failed: ${response.code} ${response.message}")
                 return@withContext LlmTextResult(false, null)
@@ -845,7 +892,11 @@ class LLMClient(private val preferenceManager: PreferenceManager? = null) {
                     ?.get("text")
                     ?.jsonPrimitive
                     ?.content
-                LlmTextResult(true, text)
+                LlmTextResult(
+                    success = true,
+                    text = text,
+                    tokenUsage = geminiTokenUsage(element.jsonObject)
+                )
             } catch (e: Exception) {
                 logError("Failed to parse Gemini response body", e)
                 LlmTextResult(true, null)
@@ -919,13 +970,14 @@ class LLMClient(private val preferenceManager: PreferenceManager? = null) {
 
     private fun executeGeminiStreaming(provider: ProviderConfig, url: String, requestBodyJson: String): LlmTextResult {
         val request = geminiPostRequest(provider, url, requestBodyJson)
-        return client.newCall(request).execute().use { response ->
+        return httpClient().newCall(request).execute().use { response ->
             if (!response.isSuccessful) {
                 logError("Gemini streaming call failed: ${response.code} ${response.message}")
                 return LlmTextResult(false, null, streamingUsed = true)
             }
             val source = response.body?.source() ?: return LlmTextResult(true, null, streamingUsed = true)
             val output = StringBuilder()
+            var tokenUsage: LlmTokenUsage? = null
             while (true) {
                 val line = source.readUtf8Line() ?: break
                 if (!line.startsWith("data:")) continue
@@ -933,6 +985,7 @@ class LLMClient(private val preferenceManager: PreferenceManager? = null) {
                 if (data.isBlank()) continue
                 runCatching {
                     val element = json.parseToJsonElement(data)
+                    tokenUsage = geminiTokenUsage(element.jsonObject) ?: tokenUsage
                     val text = element.jsonObject["candidates"]
                         ?.jsonArray
                         ?.firstOrNull()
@@ -953,7 +1006,7 @@ class LLMClient(private val preferenceManager: PreferenceManager? = null) {
                     logError("Failed to parse Gemini stream event", it)
                 }
             }
-            LlmTextResult(true, output.toString().takeIf { it.isNotBlank() }, streamingUsed = true)
+            LlmTextResult(true, output.toString().takeIf { it.isNotBlank() }, streamingUsed = true, tokenUsage = tokenUsage)
         }
     }
 
@@ -1035,7 +1088,7 @@ class LLMClient(private val preferenceManager: PreferenceManager? = null) {
                         put("type", "string")
                     }
                     put("minItems", 1)
-                    put("maxItems", 8)
+                    put("maxItems", advancedSettings().aiCandidateLimit)
                 }
                 if (includeNextWord) {
                     putJsonObject("first_candidate_next_word") {
@@ -1062,6 +1115,8 @@ class LLMClient(private val preferenceManager: PreferenceManager? = null) {
                     putJsonObject("items") {
                         put("type", "string")
                     }
+                    put("minItems", 1)
+                    put("maxItems", advancedSettings().aiCandidateLimit)
                 }
                 if (includeNextWord) {
                     putJsonObject("first_candidate_next_word") {
@@ -1183,6 +1238,91 @@ class LLMClient(private val preferenceManager: PreferenceManager? = null) {
         return if (budget > 0) maxOf(1024, budget) else 0
     }
 
+    internal fun parseOpenAiChatTokenUsage(body: String): LlmTokenUsage? {
+        return runCatching {
+            openAiChatTokenUsage(json.parseToJsonElement(body).jsonObject)
+        }.getOrNull()
+    }
+
+    internal fun parseOpenAiResponsesTokenUsage(body: String): LlmTokenUsage? {
+        return runCatching {
+            openAiResponsesTokenUsage(json.parseToJsonElement(body).jsonObject)
+        }.getOrNull()
+    }
+
+    internal fun parseAnthropicTokenUsage(body: String): LlmTokenUsage? {
+        return runCatching {
+            anthropicTokenUsage(json.parseToJsonElement(body).jsonObject)
+        }.getOrNull()
+    }
+
+    internal fun parseGeminiTokenUsage(body: String): LlmTokenUsage? {
+        return runCatching {
+            geminiTokenUsage(json.parseToJsonElement(body).jsonObject)
+        }.getOrNull()
+    }
+
+    private fun openAiChatTokenUsage(response: JsonObject): LlmTokenUsage? {
+        val usage = response["usage"] as? JsonObject ?: return null
+        return tokenUsage(
+            promptTokens = usage.intValue("prompt_tokens", "input_tokens"),
+            completionTokens = usage.intValue("completion_tokens", "output_tokens"),
+            totalTokens = usage.intValue("total_tokens")
+        )
+    }
+
+    private fun openAiResponsesTokenUsage(response: JsonObject): LlmTokenUsage? {
+        val usage = response["usage"] as? JsonObject ?: return null
+        return tokenUsage(
+            promptTokens = usage.intValue("input_tokens", "prompt_tokens"),
+            completionTokens = usage.intValue("output_tokens", "completion_tokens"),
+            totalTokens = usage.intValue("total_tokens")
+        )
+    }
+
+    private fun anthropicTokenUsage(response: JsonObject, previous: LlmTokenUsage? = null): LlmTokenUsage? {
+        val messageUsage = ((response["message"] as? JsonObject)?.get("usage")) as? JsonObject
+        val deltaUsage = ((response["delta"] as? JsonObject)?.get("usage")) as? JsonObject
+        val usage = response["usage"] as? JsonObject ?: messageUsage ?: deltaUsage ?: return previous
+        val promptTokens = usage.intValue("input_tokens") ?: previous?.promptTokens
+        val completionTokens = usage.intValue("output_tokens") ?: previous?.completionTokens
+        return tokenUsage(
+            promptTokens = promptTokens,
+            completionTokens = completionTokens,
+            totalTokens = usage.intValue("total_tokens") ?: promptTokens?.let { input ->
+                completionTokens?.let { output -> input + output }
+            }
+        ) ?: previous
+    }
+
+    private fun geminiTokenUsage(response: JsonObject): LlmTokenUsage? {
+        val usage = response["usageMetadata"] as? JsonObject ?: return null
+        return tokenUsage(
+            promptTokens = usage.intValue("promptTokenCount"),
+            completionTokens = usage.intValue("candidatesTokenCount"),
+            totalTokens = usage.intValue("totalTokenCount")
+        )
+    }
+
+    private fun tokenUsage(
+        promptTokens: Int?,
+        completionTokens: Int?,
+        totalTokens: Int?
+    ): LlmTokenUsage? {
+        val prompt = promptTokens ?: 0
+        val completion = completionTokens ?: 0
+        val total = totalTokens ?: (prompt + completion).takeIf { it > 0 } ?: 0
+        if (prompt <= 0 && completion <= 0 && total <= 0) return null
+        return LlmTokenUsage(prompt, completion, total)
+    }
+
+    private fun JsonObject.intValue(vararg keys: String): Int? {
+        return keys.firstNotNullOfOrNull { key ->
+            val value = runCatching { this[key]?.jsonPrimitive?.contentOrNull }.getOrNull()
+            value?.toIntOrNull()
+        }
+    }
+
     private fun extractOpenAiResponseText(response: JsonObject): String? {
         response["output_text"]?.jsonPrimitive?.contentOrNull?.let { return it }
         val output = response["output"]?.jsonArray ?: return null
@@ -1206,7 +1346,7 @@ class LLMClient(private val preferenceManager: PreferenceManager? = null) {
             requestBuilder.addHeader("Authorization", "Bearer ${provider.apiKey}")
         }
 
-        client.newCall(requestBuilder.build()).execute().use { response ->
+        httpClient().newCall(requestBuilder.build()).execute().use { response ->
             if (!response.isSuccessful) {
                 return ProviderDetectionResult(provider.models, provider.capabilities, "Model detection failed: HTTP ${response.code}")
             }
@@ -1285,7 +1425,7 @@ class LLMClient(private val preferenceManager: PreferenceManager? = null) {
             requestBuilder.addHeader("x-goog-api-key", provider.apiKey)
         }
 
-        client.newCall(requestBuilder.build()).execute().use { response ->
+        httpClient().newCall(requestBuilder.build()).execute().use { response ->
             if (!response.isSuccessful) {
                 return ProviderDetectionResult(provider.models, provider.capabilities, "Gemini detection failed: HTTP ${response.code}")
             }
@@ -1342,7 +1482,7 @@ class LLMClient(private val preferenceManager: PreferenceManager? = null) {
                     ?.filter { it.isNotBlank() }
                     .orEmpty()
                     .distinct()
-                    .take(MAX_CANDIDATES)
+                    .take(advancedSettings().aiCandidateLimit)
                 val nextWord = listOf(
                     "first_candidate_next_word",
                     "firstCandidateNextWord",
@@ -1357,7 +1497,7 @@ class LLMClient(private val preferenceManager: PreferenceManager? = null) {
             logError("Pinyin result parsing failed: $clean", it)
         }
 
-        return AiPinyinResult(parseJsonList(rawText).distinct().take(MAX_CANDIDATES))
+        return AiPinyinResult(parseJsonList(rawText).distinct().take(advancedSettings().aiCandidateLimit))
     }
 
     internal fun parseJsonList(rawText: String?): List<String> {
@@ -1428,7 +1568,7 @@ class LLMClient(private val preferenceManager: PreferenceManager? = null) {
         return parseJsonList(rawText)
             .mapNotNull { parsePinyinEntry(it) }
             .filter { seen.add("${it.pinyin}\u0000${it.word}") }
-            .take(MAX_LEARNED_ENTRIES)
+            .take(advancedSettings().learnedEntryLimit)
     }
 
     private fun parsePinyinEntry(value: String): UserPinyinEntry? {
@@ -1485,8 +1625,10 @@ class LLMClient(private val preferenceManager: PreferenceManager? = null) {
         userPrompt: String,
         rawResponse: String?,
         parsedOutput: List<String>,
-        error: String?
+        error: String?,
+        tokenUsage: LlmTokenUsage? = null
     ) {
+        preferenceManager?.recordLlmTokenUsage(tokenUsage)
         preferenceManager?.appendAiRequestLog(
             AiRequestLog(
                 timestampMs = System.currentTimeMillis(),
@@ -1498,7 +1640,10 @@ class LLMClient(private val preferenceManager: PreferenceManager? = null) {
                 userPrompt = userPrompt,
                 rawResponse = rawResponse,
                 parsedOutput = parsedOutput,
-                error = error
+                error = error,
+                promptTokens = tokenUsage?.promptTokens ?: 0,
+                completionTokens = tokenUsage?.completionTokens ?: 0,
+                totalTokens = tokenUsage?.totalTokens ?: 0
             )
         )
     }
@@ -1515,8 +1660,6 @@ class LLMClient(private val preferenceManager: PreferenceManager? = null) {
 
     companion object {
         private const val CANDIDATE_TOOL_NAME = "emit_candidates"
-        private const val MAX_LEARNED_ENTRIES = 12
-        private const val MAX_CANDIDATES = 8
         private val SUPPORTED_STRUCTURED_MODEL_PREFIXES = listOf(
             "gpt",
             "o1",
