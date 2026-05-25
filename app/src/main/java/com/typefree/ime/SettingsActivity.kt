@@ -67,6 +67,7 @@ import com.typefree.ime.data.PreferenceManager
 import com.typefree.ime.data.ProviderCapabilities
 import com.typefree.ime.data.ProviderConfig
 import com.typefree.ime.data.UserPinyinEntry
+import com.typefree.ime.service.ASRClient
 import com.typefree.ime.service.LLMClient
 import com.typefree.ime.service.ModelTestResult
 import com.typefree.ime.service.ProviderDetectionResult
@@ -336,7 +337,13 @@ class SettingsActivity : ComponentActivity() {
         onResult: (ModelTestResult) -> Unit
     ) {
         lifecycleScope.launch {
-            val result = LLMClient(preferenceManager).testTextModel(provider, modelName)
+            val llmClient = LLMClient(preferenceManager)
+            val result = if (provider.capabilities.supportsAsr && !llmClient.isSupportedStructuredModel(provider, modelName)) {
+                preferenceManager.recordModelRequest(provider, modelName)
+                ASRClient(this@SettingsActivity).testAsrModel(provider, modelName, snapshot.asrLanguage)
+            } else {
+                llmClient.testTextModel(provider, modelName)
+            }
             Toast.makeText(this@SettingsActivity, result.message, Toast.LENGTH_LONG).show()
             onResult(result)
             refreshSnapshot()
@@ -421,7 +428,7 @@ private val TYPE_OPTIONS = listOf(
     "openai" to "OpenAI Chat / 兼容",
     "anthropic" to "Anthropic Messages",
     "gemini" to "Gemini generateContent",
-    "openai_audio_asr" to "OpenAI Audio Transcriptions",
+    "openai_audio_asr" to "OpenAI Audio /v1/audio/transcriptions",
     "qwen_asr" to "百炼 Qwen ASR",
     "volcengine_asr" to "火山豆包 ASR"
 )
@@ -434,7 +441,7 @@ private data class SettingsSnapshot(
     val pinyinLlmEnabled: Boolean = true,
     val contextPredictionEnabled: Boolean = true,
     val advancedSettings: AdvancedImeSettings = AdvancedImeSettings(),
-    val aiCandidateDebounceMs: Int = 300,
+    val aiCandidateDebounceMs: Int = 500,
     val voiceInputEnabled: Boolean = false,
     val aiRequestLogCount: Int = 0,
     val usageStats: LocalUsageStats = LocalUsageStats(),
@@ -802,13 +809,15 @@ private fun SettingsMainScreen(
             onOpenAsrProviders()
         }
 
-        SectionTitle("高级设置")
+        SectionTitle("使用统计")
         ClickSettingRow(
             title = "使用统计",
             summary = usageStatsSummary(snapshot.usageStats)
         ) {
             onOpenUsageStats()
         }
+
+        SectionTitle("高级设置")
         ClickSettingRow(
             title = "输入与模型高级参数",
             summary = advancedSettingsSummary(snapshot.advancedSettings, snapshot.usageStats)
@@ -875,19 +884,25 @@ private fun UsageStatsScreen(
             Text("清空统计")
         }
 
-        SectionTitle("按键点击")
-        if (keyPressCounts.isEmpty()) {
-            Text(
-                text = "暂无按键统计。",
-                style = MaterialTheme.typography.bodyMedium,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
-            )
-        } else {
-            keyPressCounts.entries
-                .sortedByDescending { it.value }
-                .forEach { entry ->
-                    StatLine(keyPressLabel(entry.key), entry.value.toString())
-                }
+        SectionTitle("每个按键点击")
+        Text(
+            text = "按键布局逐键统计；没有点击过的按键显示 0。",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
+        KeyStatRows("字母键盘", ALPHA_KEY_STAT_ROWS, keyPressCounts)
+        KeyStatRows("符号键盘", SYMBOL_KEY_STAT_ROWS, keyPressCounts)
+        KeyStatRows("功能按键", FUNCTION_KEY_STAT_ROWS, keyPressCounts)
+        val knownKeys = knownStatKeys()
+        val extraKeyCounts = keyPressCounts
+            .filterKeys { it !in knownKeys }
+            .toList()
+            .sortedByDescending { it.second }
+        if (extraKeyCounts.isNotEmpty()) {
+            SectionTitle("其他按键")
+            extraKeyCounts.forEach { (key, count) ->
+                StatLine(keyPressLabel(key), count.toString())
+            }
         }
 
         SectionTitle("模型请求")
@@ -948,17 +963,130 @@ private fun StatLine(label: String, value: String) {
     HorizontalDivider()
 }
 
+@Composable
+private fun KeyStatRows(
+    title: String,
+    rows: List<List<String>>,
+    keyPressCounts: Map<String, Long>
+) {
+    SectionTitle(title)
+    rows.forEach { row ->
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(6.dp)
+        ) {
+            row.forEach { key ->
+                KeyStatCell(
+                    key = key,
+                    count = keyPressCounts[key] ?: 0L,
+                    modifier = Modifier.weight(keyStatWeight(key))
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun KeyStatCell(key: String, count: Long, modifier: Modifier = Modifier) {
+    Card(
+        modifier = modifier,
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainer)
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 6.dp, vertical = 8.dp),
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.spacedBy(2.dp)
+        ) {
+            Text(
+                text = keyPressLabel(key),
+                style = MaterialTheme.typography.bodySmall,
+                maxLines = 1
+            )
+            Text(
+                text = count.toString(),
+                style = MaterialTheme.typography.bodyMedium,
+                fontWeight = FontWeight.Medium,
+                maxLines = 1
+            )
+        }
+    }
+}
+
 private fun keyPressLabel(key: String): String {
     return when (key) {
         "space" -> "空格"
         "enter" -> "回车"
         "backspace" -> "退格"
-        "lang" -> "中英切换"
+        "lang" -> "中/英"
         "mic" -> "麦克风"
+        "settings" -> "设置"
         "candidate" -> "候选词"
-        else -> if (key.startsWith("emoji:")) "Emoji ${key.removePrefix("emoji:")}" else key
+        "shift" -> "Shift"
+        "?123" -> "符号"
+        "abc" -> "字母"
+        "emoji" -> "Emoji"
+        "emojiSearch" -> "E搜"
+        "emojiSearchClose" -> "E确认"
+        "emojiSearchClear" -> "E清"
+        "emojiSearchBackspace" -> "E退"
+        "emojiSearchSpace" -> "E空"
+        "symPrev" -> "上页"
+        "symNext" -> "下页"
+        "unknown" -> "未知"
+        else -> when {
+            key.startsWith("emoji:") -> "Emoji ${key.removePrefix("emoji:")}"
+            key.startsWith("emojiCat:") -> "Emoji ${key.removePrefix("emojiCat:")}"
+            else -> key
+        }
     }
 }
+
+private fun keyStatWeight(key: String): Float {
+    return when (key) {
+        "space" -> 4f
+        "emojiSearchSpace" -> 3f
+        ",", "." -> 1.1f
+        "shift", "backspace", "enter" -> 1.55f
+        "emoji", "emojiSearch", "emojiSearchClose", "emojiSearchClear",
+        "emojiSearchBackspace", "symPrev", "symNext" -> 1.2f
+        else -> 1f
+    }
+}
+
+private fun knownStatKeys(): Set<String> {
+    return (ALPHA_KEY_STAT_ROWS + SYMBOL_KEY_STAT_ROWS + FUNCTION_KEY_STAT_ROWS)
+        .flatten()
+        .toSet()
+}
+
+private val ALPHA_KEY_STAT_ROWS = listOf(
+    listOf("q", "w", "e", "r", "t", "y", "u", "i", "o", "p"),
+    listOf("a", "s", "d", "f", "g", "h", "j", "k", "l"),
+    listOf("shift", "z", "x", "c", "v", "b", "n", "m", "backspace"),
+    listOf("?123", "lang", ",", "space", ".", "enter")
+)
+
+private val SYMBOL_KEY_STAT_ROWS = listOf(
+    listOf("1", "2", "3", "4", "5", "6", "7", "8", "9", "0"),
+    listOf("@", "#", "$", "%", "&", "*", "-", "+", "=", "/"),
+    listOf("(", ")", "[", "]", "{", "}", "<", ">", "_", "\\"),
+    listOf("?", "!", ":", ";", "\"", "'", "|", "abc", "symPrev", "symNext"),
+    listOf("~", "`", "^", "•", "·", "…", "、", "。", "，", "？"),
+    listOf("！", "：", "；", "“", "”", "‘", "’", "《", "》"),
+    listOf("「", "」", "『", "』", "（", "）", "【", "】", "—", "～"),
+    listOf("￥", "€", "£", "¥", "¢", "©", "®", "™", "°"),
+    listOf("±", "×", "÷", "≠", "≈", "≤", "≥", "√", "∞", "∑"),
+    listOf("←", "→", "↑", "↓", "↔", "↕", "✓", "✕", "★", "☆"),
+    listOf("■", "□", "●", "○", "◆", "◇", "▲", "△", "▼", "▽")
+)
+
+private val FUNCTION_KEY_STAT_ROWS = listOf(
+    listOf("emoji", "emojiSearch", "emojiSearchClear", "emojiSearchBackspace", "emojiSearchClose"),
+    listOf("mic", "settings", "candidate", "emojiSearchSpace")
+)
 
 @Composable
 private fun AdvancedSettingsScreen(
@@ -997,7 +1125,7 @@ private fun AdvancedSettingsScreen(
         AdvancedNumberField("光标后上下文字数", contextAfterChars, "0-200") { contextAfterChars = it }
 
         SectionTitle("AI 候选")
-        AdvancedNumberField("AI 候选等待毫秒", aiCandidateDebounceMs, "0-5000") { aiCandidateDebounceMs = it }
+        AdvancedNumberField("LLM 请求静止时间毫秒", aiCandidateDebounceMs, "0-5000，拼音连续输入时至少静止这么久才请求 LLM") { aiCandidateDebounceMs = it }
         AdvancedNumberField("AI 返回候选上限", aiCandidateLimit, "1-20") { aiCandidateLimit = it }
         AdvancedNumberField("单次 AI 学词上限", learnedEntryLimit, "1-50") { learnedEntryLimit = it }
 
@@ -1125,6 +1253,14 @@ private fun LocalDictionaryScreen(
             .padding(horizontal = 18.dp, vertical = 12.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp)
     ) {
+        OutlinedTextField(
+            value = searchQuery,
+            onValueChange = { searchQuery = it },
+            modifier = Modifier.fillMaxWidth(),
+            label = { Text("搜索拼音或词语") },
+            singleLine = true
+        )
+
         Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
             Button(
                 onClick = { showAddDialog = true },
@@ -1150,14 +1286,6 @@ private fun LocalDictionaryScreen(
             text = "格式: pinyin,词1,词2。键盘只使用用户词库；拼音全拼和首字母都会参与匹配。",
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant
-        )
-
-        OutlinedTextField(
-            value = searchQuery,
-            onValueChange = { searchQuery = it },
-            modifier = Modifier.fillMaxWidth(),
-            label = { Text("搜索拼音或词语") },
-            singleLine = true
         )
 
         if (filteredEntries.isEmpty()) {
@@ -1341,6 +1469,7 @@ private fun ProviderDetailScreen(
             onValueChange = { baseUrl = it },
             modifier = Modifier.fillMaxWidth(),
             label = { Text("Base URL") },
+            supportingText = { Text(baseUrlHelp(type)) },
             singleLine = true
         )
         OutlinedTextField(
@@ -1451,7 +1580,7 @@ private fun ProviderDetailScreen(
                                 )
                             }
                     }
-                    if (capabilities.supportsStructuredOutput || capabilities.supportsToolCalling) {
+                    if (capabilities.supportsStructuredOutput || capabilities.supportsToolCalling || capabilities.supportsAsr) {
                         TextButton(
                             onClick = {
                                 testingModel = model
@@ -1461,7 +1590,7 @@ private fun ProviderDetailScreen(
                                     modelTestResult = model to result
                                 }
                             },
-                            enabled = testingModel == null && enabled && baseUrl.isNotBlank()
+                            enabled = testingModel == null && baseUrl.isNotBlank()
                         ) {
                             if (testingModel == model) {
                                 CircularProgressIndicator(
@@ -1990,6 +2119,7 @@ private fun AddProviderDialog(
                     onValueChange = { baseUrl = it },
                     modifier = Modifier.fillMaxWidth(),
                     label = { Text("Base URL") },
+                    supportingText = { Text(baseUrlHelp(type)) },
                     singleLine = true
                 )
                 OutlinedTextField(
@@ -2135,7 +2265,7 @@ private fun DebounceDialog(
 
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text("AI 候选等待") },
+        title = { Text("LLM 请求静止时间") },
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
                 OutlinedTextField(
@@ -2143,12 +2273,12 @@ private fun DebounceDialog(
                     onValueChange = { input ->
                         value = input.filter { it.isDigit() || it == '.' }.take(5)
                     },
-                    label = { Text("秒，0 表示不等待") },
+                    label = { Text("秒，0 表示输入后立即请求") },
                     singleLine = true,
                     keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal)
                 )
                 Text(
-                    text = "默认 0.3 秒；最大 5 秒。输入期间会取消上一次等待，停顿达到这里的时间后才请求模型。",
+                    text = "默认 0.5 秒；最大 5 秒。这里是发起 LLM 请求前所需的最少静止时间，本地拼音候选会立即显示，不会被这个值延迟。",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
@@ -2181,14 +2311,13 @@ private fun bindingSummary(snapshot: SettingsSnapshot, providerId: String, model
 }
 
 private fun advancedSettingsSummary(settings: AdvancedImeSettings, stats: LocalUsageStats): String {
-    return "等待 ${settings.aiCandidateDebounceMs}ms | 上下文 ${settings.contextBeforeChars}/${settings.contextAfterChars} 字 | 本地候选 ${settings.localCandidateLimit} | token ${stats.llmTotalTokens}"
+    return "LLM 静止 ${settings.aiCandidateDebounceMs}ms | 上下文 ${settings.contextBeforeChars}/${settings.contextAfterChars} 字 | 本地候选 ${settings.localCandidateLimit} | token ${stats.llmTotalTokens}"
 }
 
 private fun providerReadiness(provider: ProviderConfig): String {
     return when {
         !provider.enabled -> "服务商已关闭"
         provider.baseUrl.isBlank() -> "未配置 Base URL"
-        provider.apiKey.isBlank() && !provider.baseUrl.isLocalEndpoint() -> "未配置 API Key，AI 功能不会请求网络"
         provider.models.isEmpty() -> "未配置模型列表"
         else -> ""
     }
@@ -2196,6 +2325,15 @@ private fun providerReadiness(provider: ProviderConfig): String {
 
 private fun providerTypeLabel(type: String): String {
     return TYPE_OPTIONS.firstOrNull { it.first == type }?.second ?: type
+}
+
+private fun baseUrlHelp(type: String): String {
+    return when (type) {
+        "openai_audio_asr" -> "可填服务根地址或 /v1；实际请求会使用 /v1/audio/transcriptions。"
+        "openai", "openai_responses" -> "OpenAI 兼容服务可填根地址或 /v1；根地址会自动补 /v1。"
+        "qwen_asr" -> "百炼兼容模式通常为 https://dashscope.aliyuncs.com/compatible-mode/v1。"
+        else -> "填写该服务商的 API 根地址。"
+    }
 }
 
 private fun providerTypeOptions(mode: ProviderListMode): List<Pair<String, String>> {
@@ -2309,11 +2447,4 @@ private fun languageLabel(value: String): String {
         "ko" -> "韩文"
         else -> "自动检测"
     }
-}
-
-private fun String.isLocalEndpoint(): Boolean {
-    val lower = lowercase(Locale.US)
-    return lower.startsWith("http://localhost") ||
-        lower.startsWith("http://127.0.0.1") ||
-        lower.startsWith("http://10.0.2.2")
 }

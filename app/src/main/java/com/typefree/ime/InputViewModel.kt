@@ -221,6 +221,10 @@ class InputViewModel(
         service.currentInputConnection?.let { commitTextAndTrack(it, emoji, 1) }
     }
 
+    fun onKeyStatistic(key: String) {
+        recordKeyPress(key)
+    }
+
     private fun commitCandidate(candidate: Candidate, learnAiSelection: Boolean) {
         if (candidate.isPlaceholder) return
         val sourcePinyin = _pinyinBuffer.value

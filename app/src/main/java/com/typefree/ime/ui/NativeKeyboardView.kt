@@ -38,6 +38,7 @@ class NativeKeyboardView(context: Context) : LinearLayout(context) {
         fun onEmojiClick(emoji: String)
         fun onSettingsClick()
         fun onPinyinClick(index: Int)
+        fun onKeyStatistic(key: String)
     }
 
     data class State(
@@ -238,6 +239,7 @@ class NativeKeyboardView(context: Context) : LinearLayout(context) {
 
         if (layoutMode == KeyboardLayout.EMOJI) {
             toolbarHost.addView(toolbarIconButton(R.drawable.ic_search_24, "搜索 emoji", isActive = emojiSearchMode) {
+                callbacks?.onKeyStatistic("emojiSearch")
                 emojiSearchMode = true
                 renderToolbar()
                 renderCandidateBar()
@@ -250,6 +252,7 @@ class NativeKeyboardView(context: Context) : LinearLayout(context) {
         }
 
         toolbarHost.addView(toolbarIconButton(R.drawable.ic_mood_24, "Emoji", isActive = layoutMode == KeyboardLayout.EMOJI) {
+            callbacks?.onKeyStatistic("emoji")
             layoutMode = KeyboardLayout.EMOJI
             emojiSearchMode = false
             shiftActive = false
@@ -267,6 +270,7 @@ class NativeKeyboardView(context: Context) : LinearLayout(context) {
             })
         }
         toolbarHost.addView(toolbarIconButton(R.drawable.ic_settings_24, "设置", isActive = false) {
+            callbacks?.onKeyStatistic("settings")
             callbacks?.onSettingsClick()
         })
     }
@@ -616,6 +620,7 @@ class NativeKeyboardView(context: Context) : LinearLayout(context) {
     private fun handleKey(key: String) {
         when (key) {
             "shift" -> {
+                callbacks?.onKeyStatistic("shift")
                 shiftActive = !shiftActive
                 renderRows()
             }
@@ -624,12 +629,14 @@ class NativeKeyboardView(context: Context) : LinearLayout(context) {
             "enter" -> callbacks?.onEnter()
             "lang" -> callbacks?.onToggleLanguage()
             "emoji" -> {
+                callbacks?.onKeyStatistic("emoji")
                 layoutMode = KeyboardLayout.EMOJI
                 emojiSearchMode = false
                 shiftActive = false
                 refreshEmojiSearchUi(includeRows = true)
             }
             "?123" -> {
+                callbacks?.onKeyStatistic("?123")
                 layoutMode = KeyboardLayout.SYMBOLS
                 symbolsPage = 0
                 emojiSearchMode = false
@@ -637,51 +644,61 @@ class NativeKeyboardView(context: Context) : LinearLayout(context) {
                 refreshEmojiSearchUi(includeRows = true)
             }
             "abc" -> {
+                callbacks?.onKeyStatistic("abc")
                 layoutMode = KeyboardLayout.ALPHA
                 emojiSearchMode = false
                 shiftActive = false
                 refreshEmojiSearchUi(includeRows = true)
             }
             "emojiSearch" -> {
+                callbacks?.onKeyStatistic("emojiSearch")
                 layoutMode = KeyboardLayout.EMOJI
                 emojiSearchMode = true
                 refreshEmojiSearchUi(includeRows = true)
             }
             "emojiSearchClose" -> {
+                callbacks?.onKeyStatistic("emojiSearchClose")
                 emojiSearchMode = false
                 refreshEmojiSearchUi(includeRows = true)
             }
             "emojiSearchClear" -> {
+                callbacks?.onKeyStatistic("emojiSearchClear")
                 emojiSearchQuery = ""
                 refreshEmojiSearchUi(includeRows = false)
             }
             "emojiSearchBackspace" -> {
+                callbacks?.onKeyStatistic("emojiSearchBackspace")
                 if (emojiSearchQuery.isNotEmpty()) {
                     emojiSearchQuery = emojiSearchQuery.dropLast(1)
                     refreshEmojiSearchUi(includeRows = false)
                 }
             }
             "emojiSearchSpace" -> {
+                callbacks?.onKeyStatistic("emojiSearchSpace")
                 if (emojiSearchQuery.isNotEmpty() && !emojiSearchQuery.endsWith(" ")) {
                     emojiSearchQuery += " "
                     refreshEmojiSearchUi(includeRows = false)
                 }
             }
             in EMOJI_CATEGORY_KEYS -> {
+                callbacks?.onKeyStatistic(key)
                 emojiCategory = key.removePrefix(EMOJI_CATEGORY_KEY_PREFIX)
                 renderRows()
                 renderedKeyboardSignature = keyboardSignature()
             }
             "symPrev" -> {
+                callbacks?.onKeyStatistic("symPrev")
                 symbolsPage = previousPage(symbolsPage, SYMBOL_PAGES.size)
                 renderRows()
             }
             "symNext" -> {
+                callbacks?.onKeyStatistic("symNext")
                 symbolsPage = nextPage(symbolsPage, SYMBOL_PAGES.size)
                 renderRows()
             }
             else -> {
                 if (emojiSearchMode && key.length == 1 && key[0].lowercaseChar() in 'a'..'z') {
+                    callbacks?.onKeyStatistic(key.lowercase())
                     emojiSearchQuery += key.lowercase()
                     refreshEmojiSearchUi(includeRows = false)
                     return

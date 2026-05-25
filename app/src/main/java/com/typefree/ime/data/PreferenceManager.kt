@@ -74,9 +74,9 @@ data class LlmTokenUsage(
 
 @Serializable
 data class AdvancedImeSettings(
-    val aiCandidateDebounceMs: Int = 300,
-    val contextBeforeChars: Int = 50,
-    val contextAfterChars: Int = 30,
+    val aiCandidateDebounceMs: Int = 500,
+    val contextBeforeChars: Int = 10,
+    val contextAfterChars: Int = 10,
     val aiCandidateLimit: Int = 8,
     val learnedEntryLimit: Int = 12,
     val localCandidateLimit: Int = 40,

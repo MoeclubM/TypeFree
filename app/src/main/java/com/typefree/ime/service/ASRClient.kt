@@ -15,6 +15,7 @@ import okhttp3.RequestBody.Companion.asRequestBody
 import okhttp3.RequestBody.Companion.toRequestBody
 import org.json.JSONArray
 import org.json.JSONObject
+import java.io.ByteArrayOutputStream
 import java.io.File
 import java.io.IOException
 import java.util.UUID
@@ -28,6 +29,20 @@ class ASRClient(private val context: Context) {
 
     private var mediaRecorder: MediaRecorder? = null
     private var audioFile: File? = null
+
+    private data class AudioPayload(
+        val mimeType: String,
+        val dataUrlMimeType: String,
+        val format: String,
+        val volcCodec: String,
+        val sampleRate: Int
+    )
+
+    private data class AsrApiResult(
+        val success: Boolean,
+        val text: String?,
+        val message: String
+    )
 
     fun startApiRecording(): Boolean {
         try {
@@ -85,18 +100,57 @@ class ASRClient(private val context: Context) {
         }
     }
 
+    suspend fun testAsrModel(provider: ProviderConfig, modelName: String, language: String): ModelTestResult = withContext(Dispatchers.IO) {
+        if (modelName.isBlank()) {
+            return@withContext ModelTestResult(false, "模型为空")
+        }
+        if (provider.baseUrl.isBlank()) {
+            return@withContext ModelTestResult(false, "未配置 Base URL")
+        }
+
+        val testFile = createSilentWavFile()
+        try {
+            val result = when {
+                provider.type == "openai_audio_asr" -> executeOpenAiAudioTranscription(provider, modelName, language, testFile)
+                provider.type == "qwen_asr" || modelName.contains("qwen", ignoreCase = true) && modelName.contains("asr", ignoreCase = true) ->
+                    executeQwenAsr(provider, modelName, language, testFile)
+                provider.type == "volcengine_asr" -> executeVolcengineAsr(provider, modelName, language, testFile)
+                else -> executeOpenAiAudioTranscription(provider, modelName, language, testFile)
+            }
+            if (result.success) {
+                val textSuffix = result.text?.takeIf { it.isNotBlank() }?.let { "，返回: ${it.take(40)}" }.orEmpty()
+                ModelTestResult(true, "ASR 测试通过: ${result.message}$textSuffix")
+            } else {
+                ModelTestResult(false, "ASR 测试失败: ${result.message}")
+            }
+        } finally {
+            if (testFile.exists()) testFile.delete()
+        }
+    }
+
     private fun transcribeOpenAiAudio(provider: ProviderConfig, modelName: String, language: String, file: File): String? {
-        val url = if (provider.baseUrl.endsWith("/audio/transcriptions")) provider.baseUrl
-        else "${provider.baseUrl.trimEnd('/')}/audio/transcriptions"
+        val result = executeOpenAiAudioTranscription(provider, modelName, language, file)
+        if (!result.success) {
+            Log.e("ASRClient", "ASR upload failed: ${result.message}")
+        }
+        return result.text?.takeIf { it.isNotBlank() }
+    }
 
-        val requestFile = file.asRequestBody("audio/m4a".toMediaType())
+    private fun executeOpenAiAudioTranscription(provider: ProviderConfig, modelName: String, language: String, file: File): AsrApiResult {
+        val url = openAiEndpointUrl(provider.baseUrl, "audio/transcriptions")
+        val payload = audioPayloadForFile(file)
 
-        val requestBody = MultipartBody.Builder()
+        val requestFile = file.asRequestBody(payload.mimeType.toMediaType())
+
+        val requestBodyBuilder = MultipartBody.Builder()
             .setType(MultipartBody.FORM)
             .addFormDataPart("file", file.name, requestFile)
             .addFormDataPart("model", modelName)
-            .addFormDataPart("language", language)
-            .build()
+            .addFormDataPart("response_format", "json")
+        if (language.isNotBlank() && language != "auto") {
+            requestBodyBuilder.addFormDataPart("language", language)
+        }
+        val requestBody = requestBodyBuilder.build()
 
         val requestBuilder = Request.Builder()
             .url(url)
@@ -109,29 +163,36 @@ class ASRClient(private val context: Context) {
         val request = requestBuilder.build()
         return try {
             client.newCall(request).execute().use { response ->
+                val bodyString = response.body?.string().orEmpty()
                 if (!response.isSuccessful) {
-                    Log.e("ASRClient", "ASR upload failed: ${response.code} ${response.message}")
-                    return null
+                    return AsrApiResult(false, null, "HTTP ${response.code}: ${bodyString.compactForMessage().ifBlank { response.message }}")
                 }
-                val bodyString = response.body?.string() ?: return null
                 try {
                     val jsonObj = JSONObject(bodyString)
-                    jsonObj.optString("text", "")
+                    AsrApiResult(true, jsonObj.optString("text", ""), "HTTP ${response.code} ${url}")
                 } catch (e: Exception) {
                     Log.e("ASRClient", "ASR response JSON parsing failed: $bodyString", e)
-                    null
+                    AsrApiResult(false, null, "响应不是可解析 JSON: ${bodyString.compactForMessage()}")
                 }
             }
         } catch (e: IOException) {
             Log.e("ASRClient", "ASR API Call failed", e)
-            null
+            AsrApiResult(false, null, e.message ?: "网络请求失败")
         }
     }
 
     private fun transcribeQwenAsr(provider: ProviderConfig, modelName: String, language: String, file: File): String? {
-        val url = if (provider.baseUrl.endsWith("/chat/completions")) provider.baseUrl
-        else "${provider.baseUrl.trimEnd('/')}/chat/completions"
-        val audioData = file.readAudioBase64DataUrl()
+        val result = executeQwenAsr(provider, modelName, language, file)
+        if (!result.success) {
+            Log.e("ASRClient", "Qwen ASR failed: ${result.message}")
+        }
+        return result.text?.takeIf { it.isNotBlank() }
+    }
+
+    private fun executeQwenAsr(provider: ProviderConfig, modelName: String, language: String, file: File): AsrApiResult {
+        val url = openAiEndpointUrl(provider.baseUrl, "chat/completions")
+        val payload = audioPayloadForFile(file)
+        val audioData = file.readAudioBase64DataUrl(payload.dataUrlMimeType)
         val asrOptions = JSONObject()
             .put("enable_lid", language == "auto")
             .put("enable_itn", true)
@@ -154,7 +215,7 @@ class ASRClient(private val context: Context) {
                                         "input_audio",
                                         JSONObject()
                                             .put("data", audioData)
-                                            .put("format", "m4a")
+                                            .put("format", payload.format)
                                     )
                             )
                         )
@@ -182,10 +243,19 @@ class ASRClient(private val context: Context) {
     }
 
     private fun transcribeVolcengineAsr(provider: ProviderConfig, modelName: String, language: String, file: File): String? {
+        val result = executeVolcengineAsr(provider, modelName, language, file)
+        if (!result.success) {
+            Log.e("ASRClient", "Volcengine ASR failed: ${result.message}")
+        }
+        return result.text?.takeIf { it.isNotBlank() }
+    }
+
+    private fun executeVolcengineAsr(provider: ProviderConfig, modelName: String, language: String, file: File): AsrApiResult {
         val url = provider.baseUrl.ifBlank {
             "https://openspeech.bytedance.com/api/v3/auc/bigmodel/recognize/flash"
         }
         val credentials = provider.apiKey.split(":", limit = 2)
+        val payload = audioPayloadForFile(file)
         val body = JSONObject()
             .put(
                 "user",
@@ -195,9 +265,9 @@ class ASRClient(private val context: Context) {
                 "audio",
                 JSONObject()
                     .put("data", file.readAudioBase64())
-                    .put("format", "m4a")
-                    .put("codec", "aac")
-                    .put("rate", 16000)
+                    .put("format", payload.format)
+                    .put("codec", payload.volcCodec)
+                    .put("rate", payload.sampleRate)
             )
             .put(
                 "request",
@@ -234,20 +304,19 @@ class ASRClient(private val context: Context) {
         }
     }
 
-    private fun executeJsonAsrRequest(request: Request, textExtractor: (JSONObject) -> String): String? {
+    private fun executeJsonAsrRequest(request: Request, textExtractor: (JSONObject) -> String): AsrApiResult {
         return try {
             client.newCall(request).execute().use { response ->
+                val bodyString = response.body?.string().orEmpty()
                 if (!response.isSuccessful) {
-                    Log.e("ASRClient", "ASR request failed: ${response.code} ${response.message}")
-                    return null
+                    return AsrApiResult(false, null, "HTTP ${response.code}: ${bodyString.compactForMessage().ifBlank { response.message }}")
                 }
-                val bodyString = response.body?.string() ?: return null
                 val text = textExtractor(JSONObject(bodyString)).trim()
-                text.ifBlank { null }
+                AsrApiResult(true, text, "HTTP ${response.code} ${request.url}")
             }
         } catch (e: Exception) {
             Log.e("ASRClient", "ASR request failed", e)
-            null
+            AsrApiResult(false, null, e.message ?: "网络请求失败")
         }
     }
 
@@ -255,8 +324,78 @@ class ASRClient(private val context: Context) {
         return Base64.encodeToString(readBytes(), Base64.NO_WRAP)
     }
 
-    private fun File.readAudioBase64DataUrl(): String {
-        return "data:audio/mp4;base64,${readAudioBase64()}"
+    private fun File.readAudioBase64DataUrl(mimeType: String): String {
+        return "data:$mimeType;base64,${readAudioBase64()}"
+    }
+
+    private fun audioPayloadForFile(file: File): AudioPayload {
+        return when (file.extension.lowercase()) {
+            "wav" -> AudioPayload(
+                mimeType = "audio/wav",
+                dataUrlMimeType = "audio/wav",
+                format = "wav",
+                volcCodec = "pcm",
+                sampleRate = 16000
+            )
+            else -> AudioPayload(
+                mimeType = "audio/m4a",
+                dataUrlMimeType = "audio/mp4",
+                format = "m4a",
+                volcCodec = "aac",
+                sampleRate = 16000
+            )
+        }
+    }
+
+    private fun createSilentWavFile(): File {
+        return File(context.cacheDir, "typefree_asr_test.wav").apply {
+            if (exists()) delete()
+            writeBytes(silentWavBytes())
+        }
+    }
+
+    private fun silentWavBytes(durationMs: Int = 1200, sampleRate: Int = 16000): ByteArray {
+        val channels = 1
+        val bitsPerSample = 16
+        val bytesPerSample = bitsPerSample / 8
+        val sampleCount = sampleRate * durationMs / 1000
+        val dataSize = sampleCount * channels * bytesPerSample
+        return ByteArrayOutputStream(44 + dataSize).apply {
+            writeAscii("RIFF")
+            writeIntLe(36 + dataSize)
+            writeAscii("WAVE")
+            writeAscii("fmt ")
+            writeIntLe(16)
+            writeShortLe(1)
+            writeShortLe(channels)
+            writeIntLe(sampleRate)
+            writeIntLe(sampleRate * channels * bytesPerSample)
+            writeShortLe(channels * bytesPerSample)
+            writeShortLe(bitsPerSample)
+            writeAscii("data")
+            writeIntLe(dataSize)
+            write(ByteArray(dataSize))
+        }.toByteArray()
+    }
+
+    private fun ByteArrayOutputStream.writeAscii(value: String) {
+        write(value.toByteArray(Charsets.US_ASCII))
+    }
+
+    private fun ByteArrayOutputStream.writeShortLe(value: Int) {
+        write(value and 0xff)
+        write((value shr 8) and 0xff)
+    }
+
+    private fun ByteArrayOutputStream.writeIntLe(value: Int) {
+        write(value and 0xff)
+        write((value shr 8) and 0xff)
+        write((value shr 16) and 0xff)
+        write((value shr 24) and 0xff)
+    }
+
+    private fun String.compactForMessage(limit: Int = 220): String {
+        return replace(Regex("\\s+"), " ").trim().take(limit)
     }
 
     private fun JSONArray.joinText(key: String): String {

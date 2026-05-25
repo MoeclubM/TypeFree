@@ -268,6 +268,22 @@ class LLMClientTest {
     }
 
     @Test
+    fun openAiEndpointUrlAddsV1ForRootBaseUrls() {
+        assertEquals(
+            "http://192.168.86.11:8000/v1/audio/transcriptions",
+            openAiEndpointUrl("http://192.168.86.11:8000", "audio/transcriptions")
+        )
+        assertEquals(
+            "http://192.168.86.11:8000/v1/chat/completions",
+            openAiEndpointUrl("http://192.168.86.11:8000/v1", "chat/completions")
+        )
+        assertEquals(
+            "http://192.168.86.11:8000/v1/audio/transcriptions",
+            openAiEndpointUrl("http://192.168.86.11:8000/v1/audio/transcriptions", "audio/transcriptions")
+        )
+    }
+
+    @Test
     fun openAiCompatibleCapabilitiesDetectThinkingForOpenAiAndDeepSeek() {
         val openAi = client.openAiCompatibleCapabilities(
             ProviderConfig(id = "openai", name = "OpenAI", type = "openai")

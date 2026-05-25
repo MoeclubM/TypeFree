@@ -65,17 +65,6 @@ class LLMClient(private val preferenceManager: PreferenceManager? = null) {
             .build()
     }
 
-    private fun requiresApiKey(provider: ProviderConfig): Boolean {
-        return provider.apiKey.isEmpty() && !provider.baseUrl.isLocalEndpoint()
-    }
-
-    private fun String.isLocalEndpoint(): Boolean {
-        val lower = lowercase(Locale.US)
-        return lower.startsWith("http://localhost") ||
-            lower.startsWith("http://127.0.0.1") ||
-            lower.startsWith("http://10.0.2.2")
-    }
-
     /**
      * Translates a given pinyin input into Chinese characters based on surrounding context.
      */
@@ -89,7 +78,7 @@ class LLMClient(private val preferenceManager: PreferenceManager? = null) {
         pinyin: String,
         context: String
     ): AiPinyinResult {
-        if (modelName.isBlank() || requiresApiKey(provider) || !isSupportedStructuredModel(provider, modelName)) {
+        if (modelName.isBlank() || !isSupportedStructuredModel(provider, modelName)) {
             return AiPinyinResult(emptyList())
         }
 
@@ -144,7 +133,7 @@ class LLMClient(private val preferenceManager: PreferenceManager? = null) {
      * Predicts the next words or phrases based on the context.
      */
     suspend fun predictNextWords(provider: ProviderConfig, modelName: String, context: String): List<String> {
-        if (modelName.isBlank() || requiresApiKey(provider) || !isSupportedStructuredModel(provider, modelName)) {
+        if (modelName.isBlank() || !isSupportedStructuredModel(provider, modelName)) {
             return emptyList()
         }
 
@@ -192,7 +181,6 @@ class LLMClient(private val preferenceManager: PreferenceManager? = null) {
     ): List<UserPinyinEntry> {
         if (
             modelName.isBlank() ||
-            requiresApiKey(provider) ||
             !isSupportedStructuredModel(provider, modelName) ||
             sourcePinyin.isBlank() ||
             selectedText.isBlank()
@@ -258,9 +246,6 @@ class LLMClient(private val preferenceManager: PreferenceManager? = null) {
         if (modelName.isBlank()) {
             return ModelTestResult(false, "模型为空")
         }
-        if (requiresApiKey(provider)) {
-            return ModelTestResult(false, "未配置 API Key")
-        }
         if (!isSupportedStructuredModel(provider, modelName)) {
             return ModelTestResult(false, "该模型未声明原生工具调用或结构化输出能力")
         }
@@ -313,7 +298,7 @@ class LLMClient(private val preferenceManager: PreferenceManager? = null) {
                 "openai_audio_asr" -> ProviderDetectionResult(
                     models = provider.models.ifEmpty { listOf("whisper-1") },
                     capabilities = ProviderCapabilities(supportsAsr = true),
-                    message = "OpenAI-compatible audio transcription uses /audio/transcriptions."
+                    message = "OpenAI-compatible audio transcription uses /v1/audio/transcriptions."
                 )
                 "qwen_asr" -> ProviderDetectionResult(
                     models = provider.models.ifEmpty { listOf("qwen3-asr-flash") },
@@ -359,7 +344,7 @@ class LLMClient(private val preferenceManager: PreferenceManager? = null) {
         userPrompt: String,
         includeNextWord: Boolean = false
     ): LlmTextResult = withContext(Dispatchers.IO) {
-        val url = if (provider.baseUrl.endsWith("/chat/completions")) provider.baseUrl else "${provider.baseUrl.trimEnd('/')}/chat/completions"
+        val url = openAiEndpointUrl(provider.baseUrl, "chat/completions")
         val thinkingBudget = thinkingBudgetFor(provider, modelName)
         val modelSettings = provider.modelSettings[modelName]
         val primaryBody = buildOpenAiChatRequestBody(
@@ -561,7 +546,7 @@ class LLMClient(private val preferenceManager: PreferenceManager? = null) {
         userPrompt: String,
         includeNextWord: Boolean = false
     ): LlmTextResult = withContext(Dispatchers.IO) {
-        val url = if (provider.baseUrl.endsWith("/responses")) provider.baseUrl else "${provider.baseUrl.trimEnd('/')}/responses"
+        val url = openAiEndpointUrl(provider.baseUrl, "responses")
         val settings = provider.modelSettings[modelName]
         val streamRequestBodyJson = buildOpenAiResponsesRequestBody(
             modelName,
@@ -1345,7 +1330,7 @@ class LLMClient(private val preferenceManager: PreferenceManager? = null) {
     }
 
     private fun detectOpenAiCompatible(provider: ProviderConfig): ProviderDetectionResult {
-        val url = if (provider.baseUrl.endsWith("/models")) provider.baseUrl else "${provider.baseUrl.trimEnd('/')}/models"
+        val url = openAiEndpointUrl(provider.baseUrl, "models")
         val requestBuilder = Request.Builder().url(url).get()
         if (provider.apiKey.isNotEmpty()) {
             requestBuilder.addHeader("Authorization", "Bearer ${provider.apiKey}")
