@@ -1035,6 +1035,8 @@ private fun keyPressLabel(key: String): String {
         "emojiSearchSpace" -> "E空"
         "symPrev" -> "上页"
         "symNext" -> "下页"
+        "numGrid" -> "九宫"
+        "symFull" -> "符号"
         "unknown" -> "未知"
         else -> when {
             key.startsWith("emoji:") -> "Emoji ${key.removePrefix("emoji:")}"
@@ -1051,7 +1053,7 @@ private fun keyStatWeight(key: String): Float {
         ",", "." -> 1.1f
         "shift", "backspace", "enter" -> 1.55f
         "emoji", "emojiSearch", "emojiSearchClose", "emojiSearchClear",
-        "emojiSearchBackspace", "symPrev", "symNext" -> 1.2f
+        "emojiSearchBackspace", "symPrev", "symNext", "numGrid", "symFull" -> 1.2f
         else -> 1f
     }
 }
@@ -1073,7 +1075,7 @@ private val SYMBOL_KEY_STAT_ROWS = listOf(
     listOf("1", "2", "3", "4", "5", "6", "7", "8", "9", "0"),
     listOf("@", "#", "$", "%", "&", "*", "-", "+", "=", "/"),
     listOf("(", ")", "[", "]", "{", "}", "<", ">", "_", "\\"),
-    listOf("?", "!", ":", ";", "\"", "'", "|", "abc", "symPrev", "symNext"),
+    listOf("?", "!", ":", ";", "\"", "'", "|", "abc", "numGrid", "symPrev", "symNext"),
     listOf("~", "`", "^", "•", "·", "…", "、", "。", "，", "？"),
     listOf("！", "：", "；", "“", "”", "‘", "’", "《", "》"),
     listOf("「", "」", "『", "』", "（", "）", "【", "】", "—", "～"),
@@ -1085,7 +1087,7 @@ private val SYMBOL_KEY_STAT_ROWS = listOf(
 
 private val FUNCTION_KEY_STAT_ROWS = listOf(
     listOf("emoji", "emojiSearch", "emojiSearchClear", "emojiSearchBackspace", "emojiSearchClose"),
-    listOf("mic", "settings", "candidate", "emojiSearchSpace")
+    listOf("mic", "settings", "candidate", "emojiSearchSpace", "symFull")
 )
 
 @Composable

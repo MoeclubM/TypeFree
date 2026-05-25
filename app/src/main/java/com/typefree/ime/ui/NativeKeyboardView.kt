@@ -55,6 +55,7 @@ class NativeKeyboardView(context: Context) : LinearLayout(context) {
     var callbacks: Callbacks? = null
 
     private var layoutMode = KeyboardLayout.ALPHA
+    private var symbolLayout = SymbolLayout.FULL
     private var symbolsPage = 0
     private var emojiCategory = RECENT_EMOJI_CATEGORY
     private var emojiSearchMode = false
@@ -643,6 +644,18 @@ class NativeKeyboardView(context: Context) : LinearLayout(context) {
                 shiftActive = false
                 refreshEmojiSearchUi(includeRows = true)
             }
+            "numGrid" -> {
+                callbacks?.onKeyStatistic("numGrid")
+                symbolLayout = SymbolLayout.NINE_GRID
+                symbolsPage = 0
+                renderRows()
+            }
+            "symFull" -> {
+                callbacks?.onKeyStatistic("symFull")
+                symbolLayout = SymbolLayout.FULL
+                symbolsPage = 0
+                renderRows()
+            }
             "abc" -> {
                 callbacks?.onKeyStatistic("abc")
                 layoutMode = KeyboardLayout.ALPHA
@@ -746,19 +759,22 @@ class NativeKeyboardView(context: Context) : LinearLayout(context) {
             "emojiSearchSpace" -> "空格"
             "symPrev" -> "‹"
             "symNext" -> "›"
+            "numGrid" -> "九宫"
+            "symFull" -> "符号"
             else -> if (shiftActive && layoutMode == KeyboardLayout.ALPHA) key.uppercase() else key
         }
     }
 
     private fun keyTextSize(key: String): Float {
         if (key.startsWith(EMOJI_CATEGORY_KEY_PREFIX)) return 11f
+        if (symbolLayout == SymbolLayout.NINE_GRID && key.length == 1 && key[0] in '0'..'9') return 24f
         return when (key) {
             "enter" -> 30f
             "shift" -> 28f
             "backspace", "emojiSearchBackspace" -> 24f
             "emojiSearch", "emojiSearchClose", "emojiSearchClear",
             "symPrev", "symNext" -> 22f
-            "space", "?123", "abc", "lang" -> 14f
+            "space", "?123", "abc", "lang", "numGrid", "symFull" -> 14f
             "emojiSearchSpace" -> 14f
             else -> if (isSpecialKey(key)) 14f else if (key.length == 1) 19f else 22f
         }
@@ -801,7 +817,10 @@ class NativeKeyboardView(context: Context) : LinearLayout(context) {
                 listOf("shift", "z", "x", "c", "v", "b", "n", "m", "backspace"),
                 listOf("?123", "lang", ",", "space", ".", "enter")
             )
-            KeyboardLayout.SYMBOLS -> SYMBOL_PAGES[symbolsPage.coerceIn(0, SYMBOL_PAGES.lastIndex)]
+            KeyboardLayout.SYMBOLS -> when (symbolLayout) {
+                SymbolLayout.FULL -> SYMBOL_PAGES[symbolsPage.coerceIn(0, SYMBOL_PAGES.lastIndex)]
+                SymbolLayout.NINE_GRID -> NINE_GRID_SYMBOL_ROWS
+            }
             KeyboardLayout.EMOJI -> EMOJI_SEARCH_ROWS
         }
     }
@@ -814,7 +833,7 @@ class NativeKeyboardView(context: Context) : LinearLayout(context) {
             ",", "." -> 1.1f
             "shift", "backspace", "enter" -> 1.55f
             "emoji", "emojiSearch", "emojiSearchClose", "emojiSearchClear",
-            "emojiSearchBackspace", "symPrev", "symNext" -> 1.2f
+            "emojiSearchBackspace", "symPrev", "symNext", "numGrid", "symFull" -> 1.2f
             else -> 1f
         }
     }
@@ -827,7 +846,7 @@ class NativeKeyboardView(context: Context) : LinearLayout(context) {
         return when (key) {
             "shift", "backspace", "enter", "lang", "emoji", "?123", "abc",
             "emojiSearch", "emojiSearchClose", "emojiSearchClear", "emojiSearchBackspace",
-            "emojiSearchSpace", "symPrev", "symNext" -> colors.specialKey
+            "emojiSearchSpace", "symPrev", "symNext", "numGrid", "symFull" -> colors.specialKey
             else -> colors.key
         }
     }
@@ -838,7 +857,7 @@ class NativeKeyboardView(context: Context) : LinearLayout(context) {
     }
 
     private fun keyboardSignature(): String {
-        return "${layoutMode.name}|$shiftActive|${state.isChinese}|$symbolsPage|$emojiCategory|$emojiSearchMode|${state.recentEmojiCounts}"
+        return "${layoutMode.name}|${symbolLayout.name}|$shiftActive|${state.isChinese}|$symbolsPage|$emojiCategory|$emojiSearchMode|${state.recentEmojiCounts}"
     }
 
     private fun toolbarSignature(): String {
@@ -940,6 +959,11 @@ class NativeKeyboardView(context: Context) : LinearLayout(context) {
         EMOJI
     }
 
+    private enum class SymbolLayout {
+        FULL,
+        NINE_GRID
+    }
+
     private data class KeyTouchTarget(
         val key: String,
         val view: TextView
@@ -966,22 +990,30 @@ class NativeKeyboardView(context: Context) : LinearLayout(context) {
                 listOf("@", "#", "$", "%", "&", "*", "-", "+", "=", "/"),
                 listOf("(", ")", "[", "]", "{", "}", "<", ">", "_", "backspace"),
                 listOf(",", ".", "?", "!", ":", ";", "\"", "'", "\\", "|"),
-                listOf("abc", "lang", "symPrev", "space", "symNext", "enter")
+                listOf("abc", "lang", "numGrid", "symPrev", "space", "symNext", "enter")
             ),
             listOf(
                 listOf("~", "`", "^", "•", "·", "…", "、", "。", "，", "？"),
                 listOf("！", "：", "；", "“", "”", "‘", "’", "《", "》", "backspace"),
                 listOf("「", "」", "『", "』", "（", "）", "【", "】", "—", "～"),
                 listOf("￥", "$", "€", "£", "¥", "¢", "©", "®", "™", "°"),
-                listOf("abc", "lang", "symPrev", "space", "symNext", "enter")
+                listOf("abc", "lang", "numGrid", "symPrev", "space", "symNext", "enter")
             ),
             listOf(
                 listOf("±", "×", "÷", "=", "≠", "≈", "≤", "≥", "<", ">"),
                 listOf("+", "-", "*", "/", "%", "‰", "√", "∞", "∑", "backspace"),
                 listOf("←", "→", "↑", "↓", "↔", "↕", "✓", "✕", "★", "☆"),
                 listOf("■", "□", "●", "○", "◆", "◇", "▲", "△", "▼", "▽"),
-                listOf("abc", "lang", "symPrev", "space", "symNext", "enter")
+                listOf("abc", "lang", "numGrid", "symPrev", "space", "symNext", "enter")
             )
+        )
+
+        private val NINE_GRID_SYMBOL_ROWS = listOf(
+            listOf("1", "2", "3"),
+            listOf("4", "5", "6"),
+            listOf("7", "8", "9"),
+            listOf(",", "0", ".", "backspace"),
+            listOf("abc", "lang", "symFull", "space", "enter")
         )
 
         private val EMOJI_SEARCH_ROWS = listOf(
@@ -1023,7 +1055,9 @@ class NativeKeyboardView(context: Context) : LinearLayout(context) {
             "?123",
             "abc",
             "symPrev",
-            "symNext"
+            "symNext",
+            "numGrid",
+            "symFull"
         ) + EMOJI_CATEGORY_KEYS
 
         private val LIGHT_COLORS = KeyboardColors(
